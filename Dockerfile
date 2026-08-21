@@ -1,27 +1,38 @@
 # jiujiu-bookstack 全功能镜像
-# 包含: pipeline + MCP server + DeepAgent + 依赖
+# 包含: pipeline + MCP server + DeepAgent + Streamlit Web UI + 依赖
 #
 # 构建:
 #   docker build -t jiujiu-bookstack:latest .
 #
-# 运行 (pipeline):
+# 一键启动 (推荐):
+#   docker-compose up -d
+#   # 然后访问 http://localhost:8501
+#
+# 单独运行 (pipeline):
 #   docker run --rm \
 #     -v $(pwd)/config:/app/config \
 #     -v $(pwd)/books:/app/books \
 #     --network host \
 #     jiujiu-bookstack python scripts/pipeline.py books/
 #
-# 运行 (MCP server, stdio):
+# 单独运行 (MCP server, stdio):
 #   docker run -i --rm \
 #     -v $(pwd)/config:/app/config \
 #     --network host \
 #     jiujiu-bookstack python scripts/mcp_server.py
 #
-# 运行 (DeepAgent 剧本杀):
+# 单独运行 (DeepAgent 剧本杀 CLI):
 #   docker run -it --rm \
 #     -v $(pwd)/config:/app/config \
 #     --network host \
 #     jiujiu-bookstack python agent/deep_agent.py --book-id 384 --interactive
+#
+# 单独运行 (Web UI):
+#   docker run -d --rm \
+#     -p 8501:8501 \
+#     -v $(pwd)/config:/app/config \
+#     --network host \
+#     jiujiu-bookstack streamlit run web/app.py --server.port 8501 --server.address 0.0.0.0
 
 FROM python:3.11-slim
 
@@ -44,6 +55,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 项目代码
 COPY scripts/ ./scripts/
 COPY agent/ ./agent/
+COPY web/ ./web/
 COPY config/ ./config/
 COPY docs/ ./docs/
 
@@ -51,7 +63,9 @@ COPY docs/ ./docs/
 RUN mkdir -p books data logs state mindmaps tts
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app/scripts:/app
+    PYTHONPATH=/app/scripts:/app/agent:/app/web
 
-# 默认入口: 打印帮助
+EXPOSE 8501
+
+# 默认入口: 打印帮助（docker-compose 的 app 容器会覆盖）
 CMD ["python", "scripts/pipeline.py", "--help"]

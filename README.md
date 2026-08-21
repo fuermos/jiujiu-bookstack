@@ -60,22 +60,61 @@ jiujiu-bookstack/
 
 ## 🚀 5 分钟上手
 
-### 1. 安装依赖
+### 🐳 方式一：Docker 一键启动（最推荐）
 
 ```bash
-git clone https://github.com/<your-name>/jiujiu-bookstack.git
+git clone https://github.com/fuermos/jiujiu-bookstack.git
+cd jiujiu-bookstack
+
+# 1. 填配置
+cp config/config.example.yaml config/config.yaml
+$EDITOR config/config.yaml   # 填 API Key
+
+# 2. 起服务（PG + 后台 + Web UI）
+docker-compose up -d
+
+# 3. 打开浏览器
+open http://localhost:8501
+```
+
+访问 http://localhost:8501 就能看到 **Streamlit Web UI**：
+- 🏠 首页：书库浏览 + 分类统计
+- 🎮 剧本杀：选书 → 玩剧本（场景对话 + 5 维度评分）
+- 🔍 搜索：搜书名 / 语义搜原文
+- 📖 书详情：SKILL.md + 思维导图 + 摘要
+
+### 💻 方式二：本地 Python 启动
+
+```bash
+git clone https://github.com/fuermos/jiujiu-bookstack.git
 cd jiujiu-bookstack
 pip install -r requirements.txt
-```
 
-### 2. 配置大模型
+# 启动 PG（Docker）
+docker-compose up -d postgres
 
-```bash
+# 配置
 cp config/config.example.yaml config/config.yaml
-# 编辑 config.yaml，填入 API Key
+# 编辑填 API Key
+
+# 一键启动脚本（conda + 依赖 + DB + MCP）
+bash scripts/start.sh
+
+# 或手动：
+# 1. 跑流水线
+python scripts/pipeline.py books/
+
+# 2. 起 Web UI
+streamlit run web/app.py
+
+# 3. 起 MCP 给 AI Agent 用
+python scripts/mcp_server.py
+
+# 4. CLI 玩剧本杀
+python agent/deep_agent.py --book-id 384 --interactive
 ```
 
-最小可用配置（**只需要填这两个**）：
+### ⚙️ 最小配置（只需要填 2 个 Key）
 
 ```yaml
 llm:
@@ -92,36 +131,6 @@ embedding:
   base_url: http://localhost:1234/v1   # 或 https://api.openai.com/v1
   api_key: lm-studio                    # 本地 LM Studio 免 Key
   model: text-embedding-bge-m3
-```
-
-### 3. 启动数据库
-
-```bash
-# 方式 A: Docker 一键起
-docker-compose up -d postgres
-
-# 方式 B: 用你已有的 PostgreSQL
-createdb jiujiu_mind
-```
-
-### 4. 跑完整流水线
-
-```bash
-# 把书丢进 books/ 目录
-cp my_book.epub books/
-
-# 跑一遍完整流程
-python scripts/pipeline.py books/
-
-# 或针对单本 --force 强制重生成
-python scripts/pipeline.py --book-id 384 --force
-```
-
-### 5. 启动 MCP 服务
-
-```bash
-# 暴露 12 个工具给 AI Agent
-python scripts/mcp_server.py
 ```
 
 ---
@@ -253,7 +262,7 @@ MIT
 
 ## 🔗 衍生文章
 
-配套公众号文章：[《我用 LLM 把 532 本书做成了可玩的剧本杀》](#)（占位）
+配套公众号文章草稿：[`docs/article-wechat.md`](docs/article-wechat.md)（待发布）
 
 ---
 

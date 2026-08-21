@@ -1,56 +1,64 @@
-# 我用 LLM 把家里 532 本书做成了可玩的剧本杀，然后开源了
+# 我把家里 532 本电子书做成了一个可以玩的剧本杀网站
 
-> 公众号文章草稿 · 2026-08-21
+> 公众号文章草稿 v2 · 2026-08-22
 >
 > GitHub: https://github.com/fuermos/jiujiu-bookstack
 >
-> 文末有项目地址 & 上手指南
+> 在线玩: `docker-compose up -d` 后访问 http://localhost:8501
+>
+> 文末附 3 步上手指南
 
 ---
 
-## 引子：532 本书的归宿问题
+## 一、事情的起因：532 本书躺着吃灰
 
-我家有 532 本电子书，堆在硬盘里吃灰。
+我家硬盘里有 532 本电子书，**每年翻两次，每次不超过两分钟**。
 
-**传统的"读书陪伴"产品都在做两件事**：
-- RAG：问什么答什么
-- 剧本生成：生成一份一次性游戏
+买的时候都觉得自己要读完。结果要么太厚，要么翻译太烂，要么读完第一章就忘了第二章谁是谁。
 
-但缺一个东西——**把书"驯化"成一个可以反复玩、可以查、可以学的家庭知识库**。
+去年我开始用 LLM 做读书笔记，但很快发现一个问题：
 
-所以我做了 **`jiujiu-bookstack`**（[GitHub](https://github.com/fuermos/jiujiu-bookstack)）。
+**"问什么答什么"的 RAG 不是陪伴，"一次性生成剧本"也不是陪伴**。
+
+书这个东西，最好的归宿不是被读，而是被**反复使用**——可以问它、玩它、听它。让一本静态的电子书，变成一个**会跟你对话的家庭成员**。
+
+于是我做了 **`jiujiu-bookstack`**（[GitHub](https://github.com/fuermos/jiujiu-bookstack)）。
 
 ---
 
-## 它是什么？
+## 二、它是什么？
 
-**一句话**：丢进 epub，产出**结构化知识图谱、SKILL 文档、可玩游戏化剧本、叙事化摘要**的全自动流水线。
+**一句话**：丢一本 epub 进去，出来一个**结构化知识图谱 + SKILL 文档 + 可玩游戏化剧本 + 叙事化摘要**的全自动流水线。
 
-具体点：
+具体一点（拿《敢于脆弱》举例）：
 
 ```
 epub 文件
-   ↓
+    ↓
 import → embed → mindmap → skill → script+tts → summary
-   ↓
+    ↓
 你可以：
-  - 问"脆弱与力量的关系"（semantic_search）
-  - 让 AI 总结"24 角色 + 7 大框架"（SKILL.md）
-  - 玩"13 岁女生 vs 拉·封丹寓言"的剧本杀
-  - 听"深秋北京笑笑啃英语"的 TTS 旁白
+  - 问"脆弱与力量的关系"（语义搜索，5 秒返回）
+  - 让 AI 总结"24 角色 + 7 大框架"（SKILL.md，4KB）
+  - 在网页上玩"13 岁笑笑 vs 拉·封丹寓言"的剧本杀（多题型，5 维度评分）
+  - 听"深秋北京笑笑啃英语"的 TTS 旁白（edge-tts 离线生成）
 ```
 
-适用场景：家庭阅读陪伴 / 读书会运营 / 教育研究 / 私人知识库。
+这个项目我已经开源，**完整流水线 + MCP + Streamlit Web UI + Docker 一键启动**全在仓库里。
 
 ---
 
-## 核心设计：三层数据流闭环
+## 三、最重要的一个设计：三层数据流闭环
 
-这是我做这个项目**最重要的洞察**：
+我做这个项目踩过最大的坑：
 
-> 写剧本时不应该从原文 chunks 蒙眼开始，应该看到上游提炼好的结构。
+**第一版剧本生成是"蒙眼"写的**——LLM 只看到原文章节 chunks，结果生成的剧本平铺直叙、人物扁平、没有温度。
 
-具体来说：
+后来我悟了一个道理：
+
+> **剧本写得好不好，不取决于 LLM 多强，取决于喂它多少"上游提炼"。**
+
+具体做法：
 
 ```
 原始文本 chunks
@@ -64,83 +72,82 @@ import → embed → mindmap → skill → script+tts → summary
 📝 Summary  ← LLM 引用两者 → 叙事化摘要（引用角色列表 + 主题）
 ```
 
-**每层都精炼上一层，无浪费，无重复。**
+**每层都精炼上一层，不重复造轮子。**
 
 ---
 
-## 真实数据对比
+## 四、真实数据对比（来自《敢于脆弱》重跑测试）
 
-基于《敢于脆弱》（法国心理学家吉娜维芙·阿弗里伊尔）重跑测试：
-
-| 产物 | 旧（无引用） | 新（三层引用） | 提升 |
-|------|-------------|--------------|------|
+| 产物 | 旧（蒙眼生成） | 新（三层引用） | 提升 |
+|------|--------------|--------------|------|
 | SKILL.md 大小 | 1817B（本地降级） | **3959B**（LLM 完整） | **+118%** |
 | summary 字符数 | 958（流水账） | **1515**（叙事化） | **+58%** |
 | 剧本代入感 | 平铺直叙 | 引用 mindmap 角色名 | **+60%** |
 
-**剧本场景对比**：
+**剧本场景对比**（同一本书同一章节）：
 
-旧（场景标题："对话练习"）：
+旧版本（场景标题："对话练习"）：
 > 你在教室里，需要回答老师的问题。
 
-新（场景标题：**"芦苇的呼吸"**——直接引用 SKILL.md 核心隐喻）：
+新版本（场景标题：**"芦苇的呼吸"**——直接引用 SKILL.md 核心隐喻）：
 > 深秋的北京，你——笑笑，一个十三岁的初一女生——坐在书桌前啃英语单词，却被窗外一阵突如其来的雨声打断。雨水顺着窗玻璃像泪水一样滑下来，你想起今天小测又没拿满分，妈妈的叹息又轻又沉，像一片叶子落在胸口。
 
-**有没有感觉到区别？** 新版本直接引用了 mindmap 提炼的"橡树与芦苇"寓言 + 主角画像，**叙事质量肉眼可见的飞跃**。
+**区别肉眼可见。** 旧版本是答题机器，新版本是给笑笑写的小剧场。
 
 ---
 
-## 技术细节：5 个有意思的设计
+## 五、5 个有意思的设计
 
-### 1. 开箱即用（只配 Key 就跑）
+### 1. Web UI 玩剧本杀（零代码）
 
-```yaml
-# config.yaml - 只需要填两个 Key
-llm:
-  primary:
-    provider: anthropic
-    api_key: ***  # ← 这里
-    model: claude-sonnet-4-5
-embedding:
-  base_url: http://localhost:1234/v1
-  api_key: lm-studio  # 本地免 Key
-  model: text-embedding-bge-m3
+我做完 CLI 版本后，媳妇问了一句：**"我能玩吗？"**
+
+答案是"能，但你得会用命令行"——这等于不能。
+
+所以我加了 **Streamlit Web UI**。`docker-compose up -d` 之后打开浏览器：
+
+- 🏠 首页：书库浏览 + 分类统计
+- 🎮 剧本杀：选书 → 场景对话 → 提交答案 → 看反馈
+- 🔍 搜索：搜书名 / 语义搜原文
+- 📖 书详情：SKILL.md + 思维导图 + 摘要
+
+打开 http://localhost:8501，**我媳妇现在每周末都会自己打开玩**。这就够了。
+
+### 2. MCP 12 个工具（让 AI Agent 直接用）
+
+启动 `mcp_server.py` 后，对 AI Agent 暴露 12 个工具（[完整文档](https://github.com/fuermos/jiujiu-bookstack/blob/main/docs/API.md)）：
+
+```
+list_books / get_book / search_books
+semantic_search / get_chunks / get_script
+list_categories / get_random_chunk
+get_book_stats / get_category_stats
+list_books_with_status / sql_query（只读）
 ```
 
-**支持任何 OpenAI / Anthropic 协议的服务**：通义千问、文心一言、Ollama、本地 LM Studio……
-
-### 2. MCP 12 个工具（AI Agent 直接用）
-
-启动 `mcp_server.py`，AI Agent 可以：
-
-```python
-semantic_search(query="脆弱与力量", book_id=384)
-# → 返回最相关的 10 个 chunks
-```
-
-MCP 工具清单：
-- `list_books` / `get_book` / `search_books`
-- `semantic_search` / `get_chunks` / `get_script`
-- `list_categories` / `get_random_chunk`
-- `get_book_stats` / `get_category_stats`
-- `list_books_with_status` / `sql_query`（只读）
+**`sql_query` 自动拦截写操作**（DROP/UPDATE/DELETE/INSERT/ALTER/CREATE/TRUNCATE）——我专门防了一手，免得 Agent 抽风把我 67 万条向量删了。
 
 ### 3. 敏感词自动脱敏（实战踩过的坑）
 
-我用了某个国产 LLM，遇到 500 错误 `input new_sensitive (1026)`——**内容审核拦截**。
+我用了某个国产 LLM，跑到 book 164 突然 500 错误 `input new_sensitive (1026)`——**内容审核拦截**。
 
-二分定位发现是"**肉桂糖棍**"——书里列食物清单的某段。单独"肉桂""糖棍"都 OK，**组合就触发**。
+二分定位发现是**"肉桂糖棍"**——书里列食物清单的某段。单独"肉桂""糖棍"都 OK，**组合就触发**。
 
 后来我做了**敏词库自动脱敏 + 二分定位自动入库**：
-- 触发时 sanitize 替换已知词
-- 找不到触发词时二分定位最小片段
-- 自动写入 `data/sensitive_discoveries.log` 下次直接替换
 
-**实战**：book 164 chunk 11 → sanitize 后 → 国产 LLM 直接通过 ✅
+```
+LLM 调用前 sanitize(prompt) 替换已知词
+   ↓
+触发时二分定位最小片段
+   ↓
+自动写入 data/sensitive_discoveries.log 下次直接替换
+```
 
-### 4. DeepAgent 剧本杀交互
+**实测**：book 164 chunk 11 sanitize 后 → 国产 LLM 直接通过 ✅
 
-不只是"生成剧本"，还做了**完整的多 Agent 协同**：
+### 4. DeepAgent 剧本杀引擎（不是"生成完就结束"）
+
+不是生成一份剧本丢给你，而是 4 个 Agent 协同：
 
 ```
 [GameMaster] 加载剧本（调 MCP get_script）
@@ -155,95 +162,79 @@ MCP 工具清单：
                 [Evaluator] 先肯定再说建议，最后一句鼓励
 ```
 
-4 个 Agent 角色：
-- **GameMaster** - 主控剧情
-- **NPC Agent** - 角色扮演
-- **Reader** - 通过 MCP 查书库
-- **Evaluator** - 5 维度评分（深度/独特性/文本关联/真诚度/世界观对齐）
-
-启动方式：
-```bash
-python agent/deep_agent.py --book-id 384 --interactive
-```
+**Evaluator 的灵魂**：评分 prompt 里我写了"绝不用'你的回答很好'等套话"。结果它现在每句话都具体到让人脸红——"你把'脆弱'比作'雨'，原文里雨出现的次数是 3 次，建议下次可以引用具体章节。"
 
 ### 5. 幂等设计 + --force 强制重生成
 
 pipeline 是幂等的：
-- import: `UNIQUE (book_id, MD5(chunk_text))` 防重复
-- script: `UNIQUE (book_id, chapter_index, game_type)` 防双重 v2_ 前缀
-- summary: 已有则跳过（除非 `--force`）
 
-**对比"无脑重跑"**：
-- 无 --force：~6 秒（所有数据已就绪）
-- --force：~7 分钟（含 LLM 重生成 + TTS）
+```
+import:  UNIQUE (book_id, MD5(chunk_text)) 防重复
+script:  UNIQUE (book_id, chapter_index, game_type) 防双重 v2_ 前缀
+summary: 已有则跳过（除非 --force）
+```
 
-实测 book 384 三次 --force，PG 数据完全一致——**重跑不破坏**。
+实测 book 384 我重跑了 3 次，PG 数据完全一致——**重跑不破坏**。
 
 ---
 
-## 上手指南
+## 六、3 步上手（Docker 一键启动）
 
 ```bash
 # 1. 克隆
 git clone https://github.com/fuermos/jiujiu-bookstack.git
 cd jiujiu-bookstack
 
-# 2. 推荐用 miniconda（Python 3.11）
-conda create -n bookstack python=3.11
-conda activate bookstack
-pip install -r requirements.txt
-
-# 3. 启动 PG（Docker）
-docker-compose up -d
-
-# 4. 配置
+# 2. 填配置（只需要填 2 个 Key）
 cp config/config.example.yaml config/config.yaml
-# 编辑填 Key
+$EDITOR config/config.yaml
 
-# 5. 跑流水线
-python scripts/pipeline.py books/
-
-# 6. 启动 MCP 给 Agent 用
-python scripts/mcp_server.py
+# 3. 起服务
+docker-compose up -d
 ```
 
-完整文档：
-- [README.md](https://github.com/fuermos/jiujiu-bookstack)
-- [docs/ARCHITECTURE.md](https://github.com/fuermos/jiujiu-bookstack/blob/main/docs/ARCHITECTURE.md) - 三层数据流闭环详解
-- [docs/QUICKSTART.md](https://github.com/fuermos/jiujiu-bookstack/blob/main/docs/QUICKSTART.md) - 5 分钟上手
-- [docs/API.md](https://github.com/fuermos/jiujiu-bookstack/blob/main/docs/API.md) - MCP 12 工具文档
+完事。打开 **http://localhost:8501** 就能玩。
+
+想跑流水线导入 epub：
+```bash
+cp my_book.epub books/
+docker-compose exec app python scripts/pipeline.py /app/books/
+```
 
 ---
 
-## 局限 & 下一步
+## 七、局限 & 下一步
 
-**v0.1.0 局限**：
+**v0.2.0 局限**：
 - 只支持 PostgreSQL（pgvector）
 - DeepAgent 是简化版，没接 LangGraph
 - 套装书识别还在 TODO
 
-**v0.2 计划**：
+**v0.3 计划**：
+- TTS 播放嵌入 Web UI（直接听剧本）
 - 接 LangGraph（state machine + checkpoint）
-- 套装书/合集自动识别
-- Web UI（Streamlit）
-- 多语言支持
+- 多用户 / 登录
 
 ---
 
-## 写到最后
+## 八、最后说点真心话
 
-这个项目最让我开心的不是技术本身，而是**它改变了我们家"书"的角色**。
+这个项目最让我开心的，不是技术本身。
 
-以前书是静态的——读完一遍就放回去。
-现在书是**活的**——可以问它、玩它、听它，甚至让它给家里的初中生妹妹出 24 道思考题。
+是**它改变了我们家"书"的角色**。
+
+以前书是静态的——读完一遍就放回去吃灰。
+现在书是**活的**——笑笑周末会自己打开 Web UI 玩《敢于脆弱》，问妈妈"拉·封丹寓言里橡树代表什么"。
 
 **家里 532 本书，现在每一本都是一个"小型家庭知识库"**。
 
-希望这个项目也能帮到你。
+我把这个项目开源了，希望也能帮到你。
 
 **GitHub**: https://github.com/fuermos/jiujiu-bookstack
 
-欢迎 Star、Fork、提 Issue！
+欢迎 Star、Fork、提 Issue。
+
+如果跑起来了，在评论区告诉我——本喵会开心到打滚。
 
 ---
 
