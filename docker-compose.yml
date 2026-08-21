@@ -1,0 +1,33 @@
+version: '3.8'
+
+# jiujiu-bookstack 一键启动
+# 用法: docker-compose up -d
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: jiujiu-postgres
+    environment:
+      POSTGRES_PASSWORD: ***
+      POSTGRES_USER: admin
+      POSTGRES_DB: jiujiu_mind
+    ports:
+      - "15433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./config/init_db.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d jiujiu_mind"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 可选: LM Studio 本地 embedding (替代 OpenAI embedding)
+  # 启动方式: 把这行取消注释，并设置 EMBEDDING_BASE_URL=http://lmstudio:1234/v1
+  # lmstudio:
+  #   image: your-custom-lmstudio-image  # 实际不一定有官方镜像
+  #   ports:
+  #     - "1234:1234"
+
+volumes:
+  pgdata:
