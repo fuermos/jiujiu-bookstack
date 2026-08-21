@@ -59,7 +59,7 @@ if [ "$SKIP_DB" = false ] && command -v docker >/dev/null 2>&1; then
     if ! docker ps | grep -q jiujiu-postgres; then
         docker run -d \
             --name jiujiu-postgres \
-            -e POSTGRES_PASSWORD=*** \
+            -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme} \
             -e POSTGRES_DB=jiujiu_mind \
             -p 15433:5432 \
             -v pgdata:/var/lib/postgresql/data \

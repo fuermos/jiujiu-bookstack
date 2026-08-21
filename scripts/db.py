@@ -4,6 +4,7 @@ import psycopg2
 import psycopg2.extras
 from psycopg2 import pool
 from contextlib import contextmanager
+from typing import Optional
 
 _pool: Optional[pool.SimpleConnectionPool] = None
 

@@ -17,7 +17,7 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg16
         env:
-          POSTGRES_PASSWORD: ***
+          POSTGRES_PASSWORD: changeme
           POSTGRES_USER: admin
           POSTGRES_DB: jiujiu_mind_test
         ports:
@@ -50,7 +50,7 @@ jobs:
 
       - name: Initialize test DB
         env:
-          PGPASSWORD: ***
+          PGPASSWORD: changeme
         run: |
           psql -h localhost -p 15433 -U admin -d jiujiu_mind_test -f config/init_db.sql
 
@@ -64,7 +64,7 @@ jobs:
           DB_HOST: localhost
           DB_PORT: 15433
           DB_USER: admin
-          DB_PASSWORD: ***
+          DB_PASSWORD: changeme
           DB_NAME: jiujiu_mind_test
         run: |
           pytest tests/ -v --tb=short

@@ -1,383 +1,345 @@
 #!/usr/bin/env python3
-"""mcp_server.py - MCP stdio server，暴露 12 个工具给 AI Agent
+"""mcp_server.py - MCP stdio 服务器（mcp 2.0 兼容版）
 
-用法:
-    python mcp_server.py  # stdio 模式 (默认, 适合 Claude Desktop / Cursor)
-
-配置 Claude Desktop:
-    {
-      "mcpServers": {
-        "jiujiu-bookstack": {
-          "command": "python",
-          "args": ["/path/to/jiujiu-bookstack/scripts/mcp_server.py"]
-        }
-      }
-    }
+12 个工具：list_books / get_book / search_books / semantic_search / get_chunks /
+get_script / list_categories / get_random_chunk / get_book_stats / get_category_stats /
+list_books_with_status / sql_query
 """
 import asyncio
 import json
 import logging
-import re
 import os
+import sys
 from pathlib import Path
-from typing import Any
 
 import psycopg2
 import psycopg2.extras
 import requests
+import yaml
+from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+
+# mcp_types 是 mcp 2.0 的低层类型库, 在 mcp 1.x 中不存在
+# 我们这里懒导入: 只在需要时（运行 MCP stdio server）才需要它
+try:
+    from mcp_types import (
+        CallToolRequestParams,
+        CallToolResult,
+        ListToolsResult,
+        PaginatedRequestParams,
+        TextContent,
+        Tool as MCPTool,
+    )
+    MCP_V2 = True
+except ImportError:
+    MCP_V2 = False
+    # 1.x fallback: 直接定义 (mcp 1.x 中 tool 是 mcp.types.Tool)
+    from mcp.types import TextContent
+    # 1.x 不支持 add_request_handler 接口, 本文件假设运行在 mcp 2.0+
+    raise ImportError("mcp_server.py 要求 mcp >= 2.0 (请 pip install 'mcp>=2.0' 或重新构建 Docker 镜像)")
+
+# 加载项目根目录的 .env
+PROJECT_ROOT = Path(__file__).parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+log = logging.getLogger("jiujiu-mind-mcp")
 
 
-# ====== 配置 ======
-PG_CONFIG = {
-    'host': os.environ.get('DB_HOST', 'localhost'),
-    'port': int(os.environ.get('DB_PORT', '15433')),
-    'user': os.environ.get('DB_USER', 'admin'),
-    'password': os.environ.get('DB_PASSWORD', ''),
-    'dbname': os.environ.get('DB_NAME', 'jiujiu_mind'),
-}
+def _load_config() -> dict:
+    """加载配置：优先用 config_loader（支持 env 覆盖）"""
+    try:
+        from config_loader import load_config
+        return load_config(str(PROJECT_ROOT / "config" / "config.yaml"))
+    except Exception:
+        pass
+    # fallback: 自己解析
+    cfg_path = PROJECT_ROOT / "config" / "config.yaml"
+    if not cfg_path.exists():
+        cfg_path = PROJECT_ROOT / "config" / "config.example.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    db = cfg.get("database", {})
+    db["host"] = os.environ.get("DB_HOST", db.get("host", "localhost"))
+    db["port"] = int(os.environ.get("DB_PORT", db.get("port", 15433)))
+    db["user"] = os.environ.get("DB_USER", db.get("user", "admin"))
+    db["password"] = os.environ.get("DB_PASSWORD", db.get("password", ""))
+    db["dbname"] = os.environ.get("DB_NAME", db.get("dbname", "jiujiu_mind"))
+    cfg["database"] = db
+    # Embedding 也支持 env 覆盖
+    emb = cfg.get("embedding", {})
+    if "EMBEDDING_BASE_URL" in os.environ:
+        emb["base_url"] = os.environ["EMBEDDING_BASE_URL"]
+    if "EMBEDDING_MODEL" in os.environ:
+        emb["model"] = os.environ["EMBEDDING_MODEL"]
+    if "EMBEDDING_API_KEY" in os.environ:
+        emb["api_key"] = os.environ["EMBEDDING_API_KEY"]
+    cfg["embedding"] = emb
+    return cfg
 
-EMBEDDING_URL = os.environ.get('EMBEDDING_URL', 'http://localhost:1234/v1/embeddings')
-EMBEDDING_MODEL = os.environ.get('EMBEDDING_MODEL', 'text-embedding-bge-m3')
 
-# 写操作黑名单
-WRITE_KEYWORDS = re.compile(
-    r'\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY|VACUUM|REINDEX|CLUSTER|LOCK|NOTIFY|LISTEN|UNLISTEN|RESET)\b',
-    re.IGNORECASE,
-)
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', stream=__import__('sys').stderr)
-log = logging.getLogger('jiujiu-bookstack-mcp')
-
-app = Server('jiujiu-bookstack')
+CONFIG = _load_config()
+EMBEDDING_CFG = CONFIG.get("embedding", {})
 
 
 def get_conn():
-    return psycopg2.connect(**PG_CONFIG)
-
-
-def json_dumps(obj):
-    return json.dumps(obj, ensure_ascii=False, indent=2, default=str)
-
-
-# ====== MCP 工具列表 ======
-TOOLS = [
-    Tool(name='list_books', description='列出书库的书，可按分类过滤', inputSchema={
-        'type': 'object',
-        'properties': {
-            'category': {'type': 'string', 'description': '分类名（如"文学"）'},
-            'limit': {'type': 'integer', 'default': 20},
-            'offset': {'type': 'integer', 'default': 0},
-        },
-    }),
-    Tool(name='get_book', description='拿指定书的完整元数据', inputSchema={
-        'type': 'object',
-        'properties': {'book_id': {'type': 'integer', 'description': '书的 id'}},
-        'required': ['book_id'],
-    }),
-    Tool(name='search_books', description='按书名/摘要关键词搜索', inputSchema={
-        'type': 'object',
-        'properties': {
-            'query': {'type': 'string', 'description': '搜索词'},
-            'limit': {'type': 'integer', 'default': 10},
-        },
-        'required': ['query'],
-    }),
-    Tool(name='semantic_search', description='语义搜索：把 query 嵌入向量，召回最相似的 chunks', inputSchema={
-        'type': 'object',
-        'properties': {
-            'query': {'type': 'string'},
-            'top_k': {'type': 'integer', 'default': 10},
-            'book_id': {'type': 'integer', 'description': '限定只在某本书里搜'},
-        },
-        'required': ['query'],
-    }),
-    Tool(name='get_chunks', description='拿指定书的 chunks', inputSchema={
-        'type': 'object',
-        'properties': {
-            'book_id': {'type': 'integer'},
-            'chapter': {'type': 'integer', 'description': '可选，限定某 chapter'},
-            'limit': {'type': 'integer', 'default': 5},
-        },
-        'required': ['book_id'],
-    }),
-    Tool(name='get_script', description='拿指定书的剧本', inputSchema={
-        'type': 'object',
-        'properties': {
-            'book_id': {'type': 'integer'},
-            'chapter': {'type': 'integer'},
-            'game_type': {'type': 'string'},
-        },
-        'required': ['book_id'],
-    }),
-    Tool(name='list_categories', description='列出所有分类', inputSchema={'type': 'object', 'properties': {}}),
-    Tool(name='get_random_chunk', description='随机拿一个 chunk', inputSchema={
-        'type': 'object',
-        'properties': {'book_id': {'type': 'integer'}},
-    }),
-    Tool(name='get_book_stats', description='全库统计', inputSchema={'type': 'object', 'properties': {}}),
-    Tool(name='get_category_stats', description='分类统计', inputSchema={'type': 'object', 'properties': {}}),
-    Tool(name='list_books_with_status', description='按处理状态过滤', inputSchema={
-        'type': 'object',
-        'properties': {
-            'missing': {'type': 'string', 'enum': ['summary', 'category', 'script', 'embedding']},
-            'limit': {'type': 'integer', 'default': 20},
-        },
-        'required': ['missing'],
-    }),
-    Tool(name='sql_query', description='只读 SQL 查询（拒写操作）', inputSchema={
-        'type': 'object',
-        'properties': {
-            'query': {'type': 'string'},
-            'params': {'type': 'array', 'items': {'type': 'string'}},
-            'limit': {'type': 'integer', 'default': 50},
-        },
-        'required': ['query'],
-    }),
-]
-
-
-@app.list_tools()
-async def list_tools():
-    return TOOLS
-
-
-@app.call_tool()
-async def call_tool(name: str, arguments: dict):
-    try:
-        with get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                handler = HANDLERS.get(name)
-                if not handler:
-                    return [TextContent(type='text', text=f'❌ 未知工具: {name}')]
-                return await handler(cur, arguments)
-    except Exception as e:
-        log.exception(f'工具 {name} 调用失败')
-        return [TextContent(type='text', text=f'❌ {type(e).__name__}: {e}')]
-
-
-# ====== 工具实现 ======
-
-async def list_books(cur, args):
-    category = args.get('category')
-    limit = args.get('limit', 20)
-    offset = args.get('offset', 0)
-    if category:
-        cur.execute(
-            'SELECT id, name, category, summary_generated_at FROM books WHERE category = %s ORDER BY id LIMIT %s OFFSET %s',
-            (category, limit, offset),
-        )
-    else:
-        cur.execute(
-            'SELECT id, name, category, summary_generated_at FROM books ORDER BY id LIMIT %s OFFSET %s',
-            (limit, offset),
-        )
-    rows = cur.fetchall()
-    return [TextContent(type='text', text=json_dumps([dict(r) for r in rows]))]
-
-
-async def get_book(cur, args):
-    book_id = args['book_id']
-    cur.execute('SELECT * FROM books WHERE id = %s', (book_id,))
-    row = cur.fetchone()
-    if not row:
-        return [TextContent(type='text', text=f'❌ book_id={book_id} 不存在')]
-    return [TextContent(type='text', text=json_dumps(dict(row)))]
-
-
-async def search_books(cur, args):
-    query = args['query']
-    limit = args.get('limit', 10)
-    cur.execute(
-        "SELECT id, name, category, LEFT(summary, 100) AS summary_preview FROM books WHERE name ILIKE %s OR summary ILIKE %s ORDER BY id LIMIT %s",
-        (f'%{query}%', f'%{query}%', limit),
+    return psycopg2.connect(
+        host=CONFIG["database"]["host"],
+        port=CONFIG["database"]["port"],
+        user=CONFIG["database"]["user"],
+        password=CONFIG["database"]["password"],
+        dbname=CONFIG["database"]["dbname"],
     )
-    rows = cur.fetchall()
-    return [TextContent(type='text', text=json_dumps([dict(r) for r in rows]))]
 
 
-async def semantic_search(cur, args):
-    query = args['query']
-    top_k = args.get('top_k', 10)
-    book_id = args.get('book_id')
-
-    # 1. embed query
-    resp = requests.post(EMBEDDING_URL, json={'model': EMBEDDING_MODEL, 'input': query}, timeout=10)
+def embed_text(text: str) -> list[float]:
+    base = EMBEDDING_CFG.get('base_url', 'http://localhost:1234/v1').rstrip('/')
+    endpoint = '/embeddings' if base.endswith('/v1') else '/v1/embeddings'
+    resp = requests.post(
+        f"{base}{endpoint}",
+        headers={"Content-Type": "application/json"},
+        json={"model": EMBEDDING_CFG.get("model", "text-embedding-bge-m3"), "input": text},
+        timeout=30,
+    )
     resp.raise_for_status()
-    query_vec = resp.json()['data'][0]['embedding']
-
-    # 2. 召回
-    book_filter = 'AND c.book_id = %s' if book_id else ''
-    sql = f'''
-        SELECT c.id AS chunk_id, c.book_id, b.name, c.chapter_index,
-               LEFT(c.chunk_text, 300) AS preview,
-               1 - (v.embedding <=> %s::vector) AS similarity
-        FROM chunks c
-        JOIN chunk_vectors v ON v.chunk_id = c.id
-        JOIN books b ON b.id = c.book_id
-        WHERE TRUE {book_filter}
-        ORDER BY v.embedding <=> %s::vector
-        LIMIT %s
-    '''
-    params = [query_vec] + ([book_id] if book_id else []) + [query_vec, top_k]
-    cur.execute(sql, params)
-    rows = cur.fetchall()
-    return [TextContent(type='text', text=json_dumps([dict(r) for r in rows]))]
+    data = resp.json().get("data", [])
+    if data and isinstance(data[0], dict):
+        return data[0].get("embedding", [])
+    if data and isinstance(data[0], list):
+        return data[0]
+    return []
 
 
-async def get_chunks(cur, args):
-    book_id = args['book_id']
-    chapter = args.get('chapter')
-    limit = args.get('limit', 5)
-    if chapter is not None:
-        cur.execute(
-            'SELECT id, chapter_index, LEFT(chunk_text, 500) AS preview FROM chunks WHERE book_id = %s AND chapter_index = %s ORDER BY id LIMIT %s',
-            (book_id, chapter, limit),
-        )
+# ---------- 12 个工具实现 ----------
+
+def tool_list_books(args, cur):
+    category = args.get("category")
+    limit = min(int(args.get("limit", 20)), 100)
+    offset = int(args.get("offset", 0))
+    if category:
+        cur.execute("SELECT id, name, category FROM books WHERE category=%s ORDER BY id LIMIT %s OFFSET %s",
+                    (category, limit, offset))
     else:
-        cur.execute(
-            'SELECT id, chapter_index, LEFT(chunk_text, 500) AS preview FROM chunks WHERE book_id = %s ORDER BY id LIMIT %s',
-            (book_id, limit),
-        )
-    rows = cur.fetchall()
-    return [TextContent(type='text', text=json_dumps([dict(r) for r in rows]))]
+        cur.execute("SELECT id, name, category FROM books ORDER BY id LIMIT %s OFFSET %s", (limit, offset))
+    return json.dumps([dict(r) for r in cur.fetchall()], ensure_ascii=False, indent=2)
 
 
-async def get_script(cur, args):
-    book_id = args['book_id']
-    chapter = args.get('chapter')
-    game_type = args.get('game_type')
-    sql = 'SELECT id, game_type, total_scenes, status, script_json FROM game_scripts WHERE book_id = %s'
-    params = [book_id]
-    if chapter is not None:
-        sql += ' AND chapter_index = %s'
-        params.append(chapter)
-    if game_type:
-        sql += ' AND game_type = %s'
-        params.append(game_type)
-    sql += ' ORDER BY id'
+def tool_get_book(args, cur):
+    book_id = int(args["book_id"])
+    cur.execute("SELECT * FROM books WHERE id=%s", (book_id,))
+    row = cur.fetchone()
+    return json.dumps(dict(row) if row else {"error": f"book_id={book_id} 不存在"},
+                     ensure_ascii=False, indent=2, default=str)
+
+
+def tool_search_books(args, cur):
+    q = f"%{args['query']}%"
+    limit = min(int(args.get("limit", 10)), 50)
+    cur.execute("""SELECT id, name, category FROM books
+                   WHERE name ILIKE %s OR summary ILIKE %s
+                   ORDER BY id LIMIT %s""", (q, q, limit))
+    return json.dumps([dict(r) for r in cur.fetchall()], ensure_ascii=False, indent=2)
+
+
+def tool_semantic_search(args, cur):
+    query = args["query"]
+    top_k = min(int(args.get("top_k", 10)), 50)
+    book_id = args.get("book_id")
+    vec = embed_text(query)
+    vec_str = "[" + ",".join(map(str, vec)) + "]"
+    where = "WHERE c.book_id = %s" if book_id else ""
+    params = (vec_str, vec_str, vec_str, top_k) if not book_id else (vec_str, int(book_id), vec_str, top_k)
+    sql = f"""SELECT c.book_id, c.chapter_index, c.chunk_text,
+                     1 - (cv.embedding <=> %s::vector) AS similarity
+              FROM chunk_vectors cv JOIN chunks c ON c.id = cv.chunk_id
+              {where}
+              ORDER BY cv.embedding <=> %s::vector LIMIT %s"""
     cur.execute(sql, params)
-    rows = cur.fetchall()
-    return [TextContent(type='text', text=json_dumps([dict(r) for r in rows]))]
+    result = []
+    for r in cur.fetchall():
+        item = dict(r)
+        if item.get("chunk_text"):
+            item["chunk_text"] = item["chunk_text"][:200] + "..."
+        result.append(item)
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-async def list_categories(cur, args):
-    cur.execute('SELECT category, COUNT(*) AS count FROM books WHERE category IS NOT NULL GROUP BY category ORDER BY count DESC')
-    rows = cur.fetchall()
-    return [TextContent(type='text', text=json_dumps([dict(r) for r in rows]))]
+def tool_get_chunks(args, cur):
+    book_id = int(args["book_id"])
+    chapter = args.get("chapter")
+    limit = min(int(args.get("limit", 5)), 100)
+    if chapter is not None:
+        cur.execute("SELECT id, chapter_index, chunk_text FROM chunks WHERE book_id=%s AND chapter_index=%s LIMIT %s",
+                    (book_id, int(chapter), limit))
+    else:
+        cur.execute("SELECT id, chapter_index, chunk_text FROM chunks WHERE book_id=%s LIMIT %s", (book_id, limit))
+    return json.dumps([dict(r) for r in cur.fetchall()], ensure_ascii=False, indent=2, default=str)
 
 
-async def get_random_chunk(cur, args):
-    book_id = args.get('book_id')
+def tool_get_script(args, cur):
+    book_id = int(args["book_id"])
+    chapter = args.get("chapter")
+    game_type = args.get("game_type", "v2_cyoa")
+    if chapter is not None:
+        cur.execute("SELECT chapter_index, game_type, script_json FROM game_scripts WHERE book_id=%s AND chapter_index=%s AND game_type=%s",
+                    (book_id, int(chapter), game_type))
+    else:
+        cur.execute("SELECT chapter_index, game_type, script_json FROM game_scripts WHERE book_id=%s AND game_type=%s ORDER BY chapter_index",
+                    (book_id, game_type))
+    return json.dumps([dict(r) for r in cur.fetchall()], ensure_ascii=False, indent=2, default=str)
+
+
+def tool_list_categories(args, cur):
+    cur.execute("SELECT category, COUNT(*) AS n FROM books WHERE category IS NOT NULL GROUP BY category ORDER BY n DESC")
+    return json.dumps([dict(r) for r in cur.fetchall()], ensure_ascii=False, indent=2)
+
+
+def tool_get_random_chunk(args, cur):
+    book_id = args.get("book_id")
     if book_id:
-        cur.execute('SELECT id, chunk_text FROM chunks WHERE book_id = %s ORDER BY RANDOM() LIMIT 1', (book_id,))
+        cur.execute("SELECT book_id, chapter_index, chunk_text FROM chunks WHERE book_id=%s ORDER BY RANDOM() LIMIT 1",
+                    (int(book_id),))
     else:
-        cur.execute('SELECT id, book_id, chunk_text FROM chunks ORDER BY RANDOM() LIMIT 1')
+        cur.execute("SELECT book_id, chapter_index, chunk_text FROM chunks ORDER BY RANDOM() LIMIT 1")
     row = cur.fetchone()
-    if not row:
-        return [TextContent(type='text', text='❌ 无 chunks')]
-    return [TextContent(type='text', text=json_dumps(dict(row)))]
+    return json.dumps(dict(row) if row else {}, ensure_ascii=False, indent=2, default=str)
 
 
-async def get_book_stats(cur, args):
-    cur.execute('''
-        SELECT
-            (SELECT COUNT(*) FROM books) AS total_books,
-            (SELECT COUNT(*) FROM chunks) AS total_chunks,
-            (SELECT COUNT(*) FROM chunk_vectors) AS embedded_chunks,
-            (SELECT COUNT(*) FROM game_scripts) AS total_scripts,
-            (SELECT COUNT(DISTINCT book_id) FROM game_scripts) AS books_with_scripts
-    ''')
-    row = cur.fetchone()
-    return [TextContent(type='text', text=json_dumps(dict(row)))]
+def tool_get_book_stats(args, cur):
+    cur.execute("""SELECT
+        (SELECT COUNT(*) FROM books) AS books,
+        (SELECT COUNT(*) FROM chunks) AS chunks,
+        (SELECT COUNT(*) FROM chunk_vectors) AS embeddings,
+        (SELECT COUNT(*) FROM game_scripts) AS scripts,
+        (SELECT COUNT(*) FROM book_mindmaps) AS mindmaps""")
+    return json.dumps(dict(cur.fetchone()), ensure_ascii=False, indent=2)
 
 
-async def get_category_stats(cur, args):
-    cur.execute('''
-        SELECT b.category,
-               COUNT(DISTINCT b.id) AS book_count,
-               COUNT(c.id) AS chunk_count
-        FROM books b
-        LEFT JOIN chunks c ON c.book_id = b.id
-        WHERE b.category IS NOT NULL
-        GROUP BY b.category ORDER BY book_count DESC
-    ''')
-    rows = cur.fetchall()
-    return [TextContent(type='text', text=json_dumps([dict(r) for r in rows]))]
+def tool_get_category_stats(args, cur):
+    cur.execute("""SELECT b.category, COUNT(*) AS books, COALESCE(SUM(c.cnt),0) AS chunks
+                   FROM books b
+                   LEFT JOIN (SELECT book_id, COUNT(*) AS cnt FROM chunks GROUP BY book_id) c ON c.book_id=b.id
+                   WHERE b.category IS NOT NULL
+                   GROUP BY b.category ORDER BY books DESC""")
+    return json.dumps([dict(r) for r in cur.fetchall()], ensure_ascii=False, indent=2)
 
 
-async def list_books_with_status(cur, args):
-    missing = args['missing']
-    limit = args.get('limit', 20)
-
-    if missing == 'summary':
-        cur.execute("SELECT id, name FROM books WHERE summary IS NULL OR summary = '' ORDER BY id LIMIT %s", (limit,))
-    elif missing == 'category':
-        cur.execute("SELECT id, name FROM books WHERE category IS NULL OR category = '' ORDER BY id LIMIT %s", (limit,))
-    elif missing == 'script':
-        cur.execute('''SELECT b.id, b.name FROM books b
-                       WHERE NOT EXISTS (SELECT 1 FROM game_scripts g WHERE g.book_id = b.id)
-                       ORDER BY b.id LIMIT %s''', (limit,))
-    elif missing == 'embedding':
-        cur.execute('''SELECT b.id, b.name FROM books b
-                       WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.book_id = b.id)
-                         AND EXISTS (
-                           SELECT 1 FROM chunks c
-                           WHERE c.book_id = b.id
-                             AND NOT EXISTS (SELECT 1 FROM chunk_vectors v WHERE v.chunk_id = c.id)
-                         )
-                       ORDER BY b.id LIMIT %s''', (limit,))
-    rows = cur.fetchall()
-    return [TextContent(type='text', text=json_dumps([dict(r) for r in rows]))]
+def tool_list_books_with_status(args, cur):
+    missing = args["missing"]
+    limit = min(int(args.get("limit", 20)), 100)
+    where_map = {
+        "summary": "summary IS NULL OR summary = ''",
+        "category": "category IS NULL",
+        "script": "id NOT IN (SELECT DISTINCT book_id FROM game_scripts)",
+        "embedding": "id IN (SELECT book_id FROM chunks GROUP BY book_id HAVING COUNT(*) > COUNT(*) FILTER (WHERE id IN (SELECT chunk_id FROM chunk_vectors)))",
+    }
+    where = where_map.get(missing)
+    if not where:
+        return json.dumps({"error": f"unknown missing={missing}"})
+    cur.execute(f"SELECT id, name, category FROM books WHERE {where} ORDER BY id LIMIT %s", (limit,))
+    return json.dumps([dict(r) for r in cur.fetchall()], ensure_ascii=False, indent=2)
 
 
-async def sql_query(cur, args):
-    query = args['query'].strip()
-    params = args.get('params')
-    limit = args.get('limit', 50)
-
-    if WRITE_KEYWORDS.search(query):
-        return [TextContent(type='text', text='❌ 拒绝: 只允许 SELECT, 检测到写操作关键字')]
-    if not query.upper().lstrip().startswith('SELECT') and not query.upper().lstrip().startswith('WITH'):
-        return [TextContent(type='text', text='❌ 拒绝: 必须以 SELECT/WITH 开头')]
-
-    if 'LIMIT' not in query.upper():
-        query += f'\nLIMIT {limit}'
-
-    if params:
-        cur.execute(query, params)
-    else:
-        cur.execute(query)
-
-    if cur.description is None:
-        return [TextContent(type='text', text='✅ 执行成功 (无返回)')]
-
-    cols = [d.name for d in cur.description]
-    rows = cur.fetchall()
-
-    if rows and isinstance(rows[0], dict):
-        data = [{k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in r.items()} for r in rows]
-    else:
-        data = [dict(zip(cols, r)) for r in rows]
-    return [TextContent(type='text', text=json_dumps(data))]
+def tool_sql_query(args, cur):
+    query = args["query"].strip()
+    q_lower = query.lower().lstrip()
+    if not (q_lower.startswith("select") or q_lower.startswith("with")):
+        return json.dumps({"error": "只允许 SELECT/WITH 查询"})
+    forbidden = ["insert", "update", "delete", "drop", "alter", "create", "truncate", "grant", "revoke"]
+    for kw in forbidden:
+        if f" {kw} " in f" {q_lower} ":
+            return json.dumps({"error": f"禁止 {kw.upper()} 操作"})
+    cur.execute(query, args.get("params"))
+    cols = [d.name for d in cur.description] if cur.description else []
+    rows = cur.fetchmany(int(args.get("limit", 50)))
+    out = []
+    for r in rows:
+        if isinstance(r, dict):
+            out.append({c: r.get(c) for c in cols})
+        else:
+            out.append(dict(zip(cols, r)))
+    return json.dumps(out, ensure_ascii=False, indent=2, default=str)
 
 
 HANDLERS = {
-    'list_books': list_books,
-    'get_book': get_book,
-    'search_books': search_books,
-    'semantic_search': semantic_search,
-    'get_chunks': get_chunks,
-    'get_script': get_script,
-    'list_categories': list_categories,
-    'get_random_chunk': get_random_chunk,
-    'get_book_stats': get_book_stats,
-    'get_category_stats': get_category_stats,
-    'list_books_with_status': list_books_with_status,
-    'sql_query': sql_query,
+    "list_books": tool_list_books, "get_book": tool_get_book,
+    "search_books": tool_search_books, "semantic_search": tool_semantic_search,
+    "get_chunks": tool_get_chunks, "get_script": tool_get_script,
+    "list_categories": tool_list_categories, "get_random_chunk": tool_get_random_chunk,
+    "get_book_stats": tool_get_book_stats, "get_category_stats": tool_get_category_stats,
+    "list_books_with_status": tool_list_books_with_status, "sql_query": tool_sql_query,
 }
+
+
+def _make_tool(name, description, properties, required=None):
+    return MCPTool(
+        name=name,
+        description=description,
+        inputSchema={"type": "object", "properties": properties, "required": required or []},
+    )
+
+
+TOOLS = [
+    _make_tool("list_books", "列出书库（可按分类过滤）",
+               {"category": {"type": "string"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}),
+    _make_tool("get_book", "拿单本书的完整元数据（含 summary）",
+               {"book_id": {"type": "integer", "description": "书的 ID"}}, required=["book_id"]),
+    _make_tool("search_books", "按书名/摘要关键词搜索",
+               {"query": {"type": "string"}, "limit": {"type": "integer"}}, required=["query"]),
+    _make_tool("semantic_search", "语义搜索：把 query 嵌入向量，召回最相关的 chunks",
+               {"query": {"type": "string"}, "top_k": {"type": "integer"}, "book_id": {"type": "integer"}},
+               required=["query"]),
+    _make_tool("get_chunks", "拿指定书的 chunks",
+               {"book_id": {"type": "integer"}, "chapter": {"type": "integer"}, "limit": {"type": "integer"}},
+               required=["book_id"]),
+    _make_tool("get_script", "拿指定书的剧本",
+               {"book_id": {"type": "integer"}, "chapter": {"type": "integer"},
+                "game_type": {"type": "string"}}, required=["book_id"]),
+    _make_tool("list_categories", "列出所有分类 + 每类书数", {}),
+    _make_tool("get_random_chunk", "随机拿一个 chunk",
+               {"book_id": {"type": "integer", "description": "可选，限定某本书"}}),
+    _make_tool("get_book_stats", "全库统计（书数/chunks/embeddings/scripts）", {}),
+    _make_tool("get_category_stats", "分类统计（每类书数+chunks数）", {}),
+    _make_tool("list_books_with_status", "按处理状态过滤（缺summary/category/script/embedding）",
+               {"missing": {"type": "string", "enum": ["summary", "category", "script", "embedding"]},
+                "limit": {"type": "integer"}}, required=["missing"]),
+    _make_tool("sql_query", "通用 SQL 查询（仅 SELECT/WITH，拒写）",
+               {"query": {"type": "string"}, "params": {"type": "array"},
+                "limit": {"type": "integer"}}, required=["query"]),
+]
+
+
+# ---------- MCP 2.0 Server 主循环 ----------
+
+app = Server("jiujiu-mind-mcp")
+
+
+async def _handle_list_tools(params: PaginatedRequestParams) -> ListToolsResult:
+    return ListToolsResult(tools=TOOLS)
+
+
+async def _handle_call_tool(params: CallToolRequestParams) -> CallToolResult:
+    name = params.name
+    arguments = params.arguments or {}
+    handler = HANDLERS.get(name)
+    if not handler:
+        return CallToolResult(content=[TextContent(type="text", text=json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False))], isError=True)
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            result_text = handler(arguments, cur)
+        conn.commit()
+        return CallToolResult(content=[TextContent(type="text", text=result_text)])
+    except Exception as e:
+        conn.rollback()
+        log.exception(f"工具 {name} 失败")
+        return CallToolResult(content=[TextContent(type="text", text=json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False))], isError=True)
+    finally:
+        conn.close()
+
+
+app.add_request_handler("tools/list", PaginatedRequestParams, _handle_list_tools)
+app.add_request_handler("tools/call", CallToolRequestParams, _handle_call_tool)
 
 
 async def main():
@@ -385,5 +347,5 @@ async def main():
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())

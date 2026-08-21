@@ -29,6 +29,10 @@ def main():
     config = load_config(args.config)
     llm = LLMClient(config['llm'])
 
+    # 初始化数据库连接池
+    import db as db_mod
+    db_mod.init_pool(config['database'])
+
     # 检测新书
     if args.book_id:
         book_ids = [args.book_id]
@@ -40,17 +44,25 @@ def main():
         sys.exit(1)
 
     for book_id in book_ids:
-        run_full_pipeline(book_id, config, llm, args.force)
+        run_full_pipeline(book_id, config, llm, args.force, books_mode=bool(args.books_dir))
 
 
-def run_full_pipeline(book_id, config, llm, force=False):
+def run_full_pipeline(book_id, config, llm, force=False, books_mode=False):
     """完整 8 步流水线（按数据流顺序）"""
     print(f'\n{"="*60}\n📚 book={book_id} 开始处理\n{"="*60}')
 
     # Step 1: import（如果 -book-id 模式且书已存在，跳过）
-    if not is_book_imported(book_id):
+    # Step 1: import（books_dir 模式已在 detect_new_books 里完成入库）
+    if books_mode:
+        pass  # 已在 detect_new_books 时入库
+    else:
         from import_book import import_epub
-        import_epub(book_id, force=force)
+        from db import get_cursor
+        with get_cursor() as cur:
+            cur.execute('SELECT path FROM books WHERE id = %s', (book_id,))
+            row = cur.fetchone()
+        if row and row.get('path'):
+            import_epub(Path(row['path']), force=force)
 
     # Step 2: embed
     from embed_chunks import embed_pending_chunks

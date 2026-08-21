@@ -34,6 +34,11 @@ def load_config(path: str = 'config/config.yaml') -> dict:
         config['embedding']['api_key'] = os.environ.get('EMBEDDING_API_KEY', config['embedding'].get('api_key', ''))
 
     if 'database' in config:
-        config['database']['password'] = os.environ.get('DB_PASSWORD', config['database'].get('password', ''))
+        db = config['database']
+        db['password'] = os.environ.get('DB_PASSWORD', db.get('password', ''))
+        db['host'] = os.environ.get('DB_HOST', db.get('host', 'localhost'))
+        db['port'] = int(os.environ.get('DB_PORT', db.get('port', 15433)))
+        db['user'] = os.environ.get('DB_USER', db.get('user', 'admin'))
+        db['dbname'] = os.environ.get('DB_NAME', db.get('dbname', 'jiujiu_mind'))
 
     return config

@@ -1,14 +1,20 @@
-version: '3.8'
-
-# jiujiu-bookstack 一键启动
-# 用法: docker-compose up -d
+# 一键启动: PG(pgvector) + 全功能应用镜像
+#
+# 首次使用:
+#   1. cp config/config.example.yaml config/config.yaml  # 填 API Key
+#   2. docker-compose up -d                              # 起服务
+#   3. docker-compose exec app python scripts/pipeline.py books/   # 跑流水线
+#   4. docker-compose exec app python scripts/mcp_server.py        # 起 MCP
+#
+# DeepAgent 剧本杀:
+#   docker-compose run --rm app python agent/deep_agent.py --book-id 1 --interactive
 
 services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: jiujiu-postgres
     environment:
-      POSTGRES_PASSWORD: ***
+      POSTGRES_PASSWORD: changeme
       POSTGRES_USER: admin
       POSTGRES_DB: jiujiu_mind
     ports:
@@ -22,12 +28,29 @@ services:
       timeout: 5s
       retries: 5
 
-  # 可选: LM Studio 本地 embedding (替代 OpenAI embedding)
-  # 启动方式: 把这行取消注释，并设置 EMBEDDING_BASE_URL=http://lmstudio:1234/v1
-  # lmstudio:
-  #   image: your-custom-lmstudio-image  # 实际不一定有官方镜像
-  #   ports:
-  #     - "1234:1234"
+  app:
+    build: .
+    image: jiujiu-bookstack:latest
+    container_name: jiujiu-bookstack-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres          # 容器内走服务名
+      DB_PORT: 5432
+      DB_USER: admin
+      DB_PASSWORD: changeme
+      DB_NAME: jiujiu_mind
+      LLM_PRIMARY_API_KEY: ${LLM_PRIMARY_API_KEY:-}   # 环境变量注入 Key
+    volumes:
+      - ./config:/app/config             # 配置（含 config.yaml）
+      - ./books:/app/books               # 书库
+      - ./mindmaps:/app/mindmaps         # 思维导图产物
+      - ./tts:/app/tts                   # TTS 音频产物
+      - ./data:/app/data                 # 敏词库等运行数据
+      - ./logs:/app/logs
+    # 默认 sleep 保持容器存活, 用 exec 进去跑命令
+    command: ["sleep", "infinity"]
 
 volumes:
   pgdata:
