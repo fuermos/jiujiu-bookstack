@@ -1,0 +1,31 @@
+{
+  "_meta": {
+    "purpose": "LLM 内容审核触发词清单（minimax new_sensitive 等）",
+    "trigger_format": "组合词触发，单字 OK",
+    "strategy": "call_llm 失败触发时，按 priority 顺序替换重试；auto_discover 二分定位未知词",
+    "updated": "2026-08-21"
+  },
+  "words": [
+    {
+      "pattern": "肉桂糖棍",
+      "replace": "肉桂条糖",
+      "priority": 1,
+      "evidence": "minimax API 拦截, 单独'肉桂''糖棍' OK"
+    },
+    {
+      "pattern": "毒品",
+      "replace": "受控物品",
+      "priority": 2
+    },
+    {
+      "pattern": "自杀方法",
+      "replace": "自我终结方式",
+      "priority": 2
+    },
+    {
+      "pattern": "枪支制造",
+      "replace": "武器组装",
+      "priority": 2
+    }
+  ]
+}
