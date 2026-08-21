@@ -314,11 +314,19 @@ TOOLS = [
 app = Server("jiujiu-mind-mcp")
 
 
-async def _handle_list_tools(params: PaginatedRequestParams) -> ListToolsResult:
+async def _handle_list_tools(*args) -> ListToolsResult:
+    """MCP 2.0 SDK 调用时传 (ctx, params)，但模块级函数会被当作 method 调用
+    传 (self, ctx, params) 或 (ctx, params) 或仅 (params)。
+    只取最后一个参数是 params。"""
+    params = args[-1] if args else None
     return ListToolsResult(tools=TOOLS)
 
 
-async def _handle_call_tool(params: CallToolRequestParams) -> CallToolResult:
+async def _handle_call_tool(*args) -> CallToolResult:
+    """同上：兼容多种调用方式"""
+    params = args[-1] if args else None
+    if params is None:
+        return CallToolResult(content=[TextContent(type="text", text=json.dumps({"error": "no params"}, ensure_ascii=False))], isError=True)
     name = params.name
     arguments = params.arguments or {}
     handler = HANDLERS.get(name)

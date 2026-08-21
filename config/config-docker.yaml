@@ -1,0 +1,28 @@
+# 本地测试配置（已被 .gitignore 保护, 不会提交）
+llm:
+  primary:
+    name: local-lmstudio
+    provider: openai
+    base_url: http://192.168.0.14:2345/v1
+    api_key: lm-studio
+    model: qwen/qwen3.8-27b
+  fallback: []
+
+embedding:
+  base_url: http://192.168.0.14:2345/v1
+  api_key: lm-studio
+  model: text-embedding-bge-m3
+  dim: 1024
+
+database:
+  host: postgres
+  port: 5432
+  user: admin
+  password: changeme
+  dbname: jiujiu_mind
+
+pipeline:
+  chunk_size: 1000
+  overlap: 100
+  embed_batch_size: 50
+  default_game_type: v2_mixed

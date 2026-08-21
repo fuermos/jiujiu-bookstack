@@ -62,13 +62,16 @@ class MCPClient:
         self.session = self.loop.run_until_complete(session_cm.__aenter__())
         self.loop.run_until_complete(self.session.initialize())
 
-    def call(self, tool: str, args: dict) -> list:
+    def call(self, tool: str, args: dict):
         result = self.loop.run_until_complete(self.session.call_tool(tool, args))
         return result
 
     def parse(self, result) -> dict:
-        """把 MCP 返回的 list[TextContent] 解析成 dict"""
-        return json.loads(result[0].text)
+        """把 MCP 返回的 CallToolResult 解析成 dict
+
+        MCP 2.0 SDK 返回的是 CallToolResult 对象，包含 .content (list[TextContent]) 和 .isError
+        """
+        return json.loads(result.content[0].text)
 
 
 @st.cache_resource(show_spinner="🐾 连接 MCP server...")

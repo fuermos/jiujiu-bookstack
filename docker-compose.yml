@@ -63,21 +63,21 @@ services:
       app:
         condition: service_started    # 等 app 起, 但不强求健康
     environment:
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USER: admin
-      DB_PASSWORD: changeme
-      DB_NAME: jiujiu_mind
       LLM_PRIMARY_API_KEY: ${LLM_PRIMARY_API_KEY:-}
     volumes:
-      - ./config:/app/config
+      # 用 docker 专用配置 (host: postgres) 覆盖到容器内，不污染宿主的 config.yaml
+      - ./config/config-docker.yaml:/app/config/config.yaml:ro
+      # 其他数据仍共享
+      - ./config/sensitive_words.json:/app/config/sensitive_words.json:ro
+      - ./config/category_rules.yaml:/app/config/category_rules.yaml:ro
+      - ./config/init_db.sql:/app/config/init_db.sql:ro
       - ./books:/app/books
       - ./mindmaps:/app/mindmaps
       - ./tts:/app/tts
       - ./data:/app/data
       - ./logs:/app/logs
     ports:
-      - "8501:8501"                   # Streamlit Web UI
+      - "8501:8501"                   # 对外映射：宿主 8501 → 容器 8501
     command: >
       streamlit run web/app.py
         --server.port 8501

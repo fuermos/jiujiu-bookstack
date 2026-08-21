@@ -100,9 +100,7 @@ import → embed → mindmap → skill → script+tts → summary
 
 ### 1. Web UI 玩剧本杀（零代码）
 
-我做完 CLI 版本后，媳妇问了一句：**"我能玩吗？"**
-
-答案是"能，但你得会用命令行"——这等于不能。
+CLI 玩剧本杀需要命令行——这等于不能玩。
 
 所以我加了 **Streamlit Web UI**。`docker-compose up -d` 之后打开浏览器：
 
@@ -111,7 +109,7 @@ import → embed → mindmap → skill → script+tts → summary
 - 🔍 搜索：搜书名 / 语义搜原文
 - 📖 书详情：SKILL.md + 思维导图 + 摘要
 
-打开 http://localhost:8501，**我媳妇现在每周末都会自己打开玩**。这就够了。
+打开 http://localhost:8501，点几下就能开始玩。
 
 ### 2. MCP 12 个工具（让 AI Agent 直接用）
 
