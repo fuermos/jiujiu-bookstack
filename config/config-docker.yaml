@@ -1,12 +1,27 @@
-# 本地测试配置（已被 .gitignore 保护, 不会提交）
+# Docker 容器专用配置 (不污染宿主的 config.yaml)
+# primary: MiniMax M3 (生成阶段质量保证)
+# fallback: LM Studio (玩剧本杀时本地快)
+
 llm:
   primary:
-    name: local-lmstudio
-    provider: openai
-    base_url: http://192.168.0.14:2345/v1
-    api_key: lm-studio
-    model: qwen/qwen3.8-27b
-  fallback: []
+    name: minimax-m3
+    provider: anthropic
+    base_url: https://api.minimaxi.com/anthropic
+    api_key: ${MINIMAX_API_KEY}    # 从 docker-compose env 注入
+    model: MiniMax-M3
+  fallback:
+    # ornith 是 MTP (multi-token prediction) reasoning 类, thinking 已关
+    # 注意: max_tokens 必须 >= 1500, 否则只输出思考不输出答案
+    - name: lmstudio-ornith
+      provider: openai
+      base_url: http://192.168.0.14:2345/v1
+      api_key: lm-studio
+      model: ornith-1.0-9b-mtp
+    - name: lmstudio-qwen
+      provider: openai
+      base_url: http://192.168.0.14:2345/v1
+      api_key: lm-studio
+      model: qwen/qwen3.8-27b
 
 embedding:
   base_url: http://192.168.0.14:2345/v1
@@ -26,3 +41,5 @@ pipeline:
   overlap: 100
   embed_batch_size: 50
   default_game_type: v2_mixed
+  # mindmap/script 生成时，限制最大 chunks 字符数（避免 1M token prompt）
+  max_prompt_chars: 200000

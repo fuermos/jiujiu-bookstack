@@ -74,7 +74,10 @@ def run_full_pipeline(book_id, config, llm, force=False, books_mode=False):
 
     # Step 4: skill（参考 mindmap）
     from generate_skill import generate_skill
-    generate_skill(book_id, llm, force=force, mindmap_path=get_mindmap_path(book_id))
+    mindmap_path = f'mindmaps/{book_id}.mmd'
+    if not Path(mindmap_path).exists():
+        mindmap_path = None
+    generate_skill(book_id, llm, force=force, mindmap_path=mindmap_path)
 
     # Step 5-6: script + tts（参考 skill + mindmap）
     from generate_script import generate_script_and_tts

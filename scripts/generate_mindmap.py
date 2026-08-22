@@ -90,15 +90,47 @@ def generate_mindmap(book_id: int, llm: LLMClient, force: bool = False, save_pg:
     return mermaid
 
 
-def load_chunks_text(book_id: int) -> str:
-    """加载书的所有 chunks 拼接成全文"""
+def load_chunks_text(book_id: int, max_chars: int = 200000) -> str:
+    """加载书的有代表性 chunks 拼接成文本
+
+    设计：超长书（>200K 字符）只取代表性 chunks（开头/中间/结尾均匀采样），
+    避免 LLM prompt 超 1M token 慢/OOM。
+
+    采样策略：
+    - 总字符数 <= max_chars: 全部加载
+    - 总字符数 > max_chars: 按字符预算均匀采样 N 块
+    """
     with get_cursor(dict_cursor=True) as cur:
         cur.execute(
-            'SELECT chunk_text FROM chunks WHERE book_id = %s ORDER BY id',
+            'SELECT id, chunk_text FROM chunks WHERE book_id = %s ORDER BY id',
             (book_id,),
         )
-        chunks = [r['chunk_text'] for r in cur.fetchall()]
-    return ''.join(chunks)
+        chunks = cur.fetchall()
+
+    total_chars = sum(len(c['chunk_text']) for c in chunks)
+
+    if total_chars <= max_chars:
+        # 小书：全部加载
+        return ''.join(c['chunk_text'] for c in chunks)
+
+    # 大书：均匀采样
+    # 估算需要多少块: ceil(total_chars / max_chars)
+    n_needed = max(10, (total_chars + max_chars - 1) // max_chars)
+    n_needed = min(n_needed, len(chunks))  # 不超过实际块数
+
+    # 均匀采样（保留开头、结尾、中间均匀）
+    if n_needed >= len(chunks):
+        sampled = chunks
+    else:
+        step = len(chunks) / n_needed
+        indices = [int(i * step) for i in range(n_needed)]
+        # 去重 + 排序
+        indices = sorted(set(min(idx, len(chunks) - 1) for idx in indices))
+        sampled = [chunks[i] for i in indices]
+
+    print(f'  📊 大书采样: {len(chunks)} 块 → {len(sampled)} 块 ({total_chars:,} → {sum(len(c["chunk_text"]) for c in sampled):,} 字符)')
+
+    return ''.join(c['chunk_text'] for c in sampled)
 
 
 def get_book_name(book_id: int) -> str:

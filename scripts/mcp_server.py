@@ -116,12 +116,20 @@ def tool_list_books(args, cur):
     category = args.get("category")
     limit = min(int(args.get("limit", 20)), 100)
     offset = int(args.get("offset", 0))
+    sql = """SELECT b.id, b.name, b.category, b.summary,
+        (gs.id IS NOT NULL) AS has_script,
+        (bm.book_id IS NOT NULL) AS has_mindmap
+        FROM books b
+        LEFT JOIN game_scripts gs ON gs.book_id = b.id
+        LEFT JOIN book_mindmaps bm ON bm.book_id = b.id"""
     if category:
-        cur.execute("SELECT id, name, category FROM books WHERE category=%s ORDER BY id LIMIT %s OFFSET %s",
-                    (category, limit, offset))
+        sql += " WHERE b.category=%s"
+        params = (category, limit, offset)
     else:
-        cur.execute("SELECT id, name, category FROM books ORDER BY id LIMIT %s OFFSET %s", (limit, offset))
-    return json.dumps([dict(r) for r in cur.fetchall()], ensure_ascii=False, indent=2)
+        params = (limit, offset)
+    sql += " GROUP BY b.id, gs.id, bm.book_id ORDER BY b.id LIMIT %s OFFSET %s"
+    cur.execute(sql, params)
+    return json.dumps([dict(r) for r in cur.fetchall()], ensure_ascii=False, indent=2, default=str)
 
 
 def tool_get_book(args, cur):
@@ -212,7 +220,13 @@ def tool_get_book_stats(args, cur):
         (SELECT COUNT(*) FROM chunk_vectors) AS embeddings,
         (SELECT COUNT(*) FROM game_scripts) AS scripts,
         (SELECT COUNT(*) FROM book_mindmaps) AS mindmaps""")
-    return json.dumps(dict(cur.fetchone()), ensure_ascii=False, indent=2)
+    row = dict(cur.fetchone())
+    # 兼容旧字段名 (web UI 用)
+    row['total_books'] = row['books']
+    row['total_chunks'] = row['chunks']
+    row['total_scripts'] = row['scripts']
+    row['vectorized_chunks'] = row['embeddings']
+    return json.dumps(row, ensure_ascii=False, indent=2)
 
 
 def tool_get_category_stats(args, cur):

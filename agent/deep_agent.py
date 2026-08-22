@@ -151,8 +151,8 @@ class ScriptKillerAgent:
                 else:
                     answer = '我选择勇敢地面对脆弱'
 
-                # Evaluator agent 评分
-                score, feedback = await self._evaluate_answer(question, answer)
+                # DebateEvaluator 多 agent 协同评分 (温柔姐姐 + 严格导师 + 调解)
+                score, feedback = await self._debate_evaluate(question, answer)
                 print(f'   📊 评分: {score}/100')
                 print(f'   💬 {feedback}')
 
@@ -202,7 +202,7 @@ class ScriptKillerAgent:
 
 请评分 (0-100), 然后给一句温暖鼓励。'''
 
-        text, _ = await self.llm.call(
+        text, _ = self.llm.call(
             '你是温暖姐姐 + 语文老师, 5 维度评分 (深度/独特性/文本关联/真诚度/世界观), 先肯定再说建议, 最后一句鼓励。绝不用"你的回答很好"等套话。',
             user_msg,
             max_tokens=300,
@@ -213,6 +213,84 @@ class ScriptKillerAgent:
         m = re.search(r'(\d+)', text)
         score = int(m.group(1)) if m else 50
         return (min(100, max(0, score)), text)
+
+    async def _debate_evaluate(self, question: dict, answer: str) -> tuple[int, str]:
+        """多 Agent 协同评分 (Debate 模式)
+
+        3 个评分员各自打分 + 调解综合:
+        - 温柔姐姐 (Warm) - 看深度和独特性，宽容
+        - 严格导师 (Strict) - 看文本关联和真诚度，严格
+        - 调解人 (Mediator) - 综合两者，给最终评分和反馈
+
+        好处: 减少单 LLM 偏差，更准更稳
+        """
+        if not self.llm:
+            return (50, "(未配置 LLM, 跳过评分)")
+
+        # 1. 调原文 (MCP semantic_search)
+        query = answer[:30] if len(answer) > 30 else answer
+        context_text = ""
+        try:
+            chunks_result = await self.mcp.call_tool(
+                "semantic_search",
+                {"query": query, "top_k": 3, "book_id": self.book_id},
+            )
+            context = json.loads(chunks_result[0].text)
+            context_text = "\n".join(c.get("preview", "") for c in context[:3])
+        except Exception:
+            pass
+
+        eval_prompt = question.get("evaluation_prompt", "5 维度评分 (深度/独特性/文本关联/真诚度/世界观)")
+
+        # 2. 温柔姐姐评分 (宽容维度: 深度 + 独特性)
+        warm_msg = (
+            eval_prompt + "\n\n"
+            "原文参考:\n" + context_text + "\n\n"
+            "玩家回答: " + answer + "\n\n"
+            "你扮演温柔姐姐 - 一位读过原书的中文系姐姐, 重点看深度和独特性.\n"
+            "评分后先肯定亮点, 再说可改善的角度, 最后一句温暖的鼓励.\n"
+            "只输出一行: 评分: <0-100> 你的反馈"
+        )
+
+        # 3. 严格导师评分 (严格维度: 文本关联 + 真诚度 + 世界观)
+        strict_msg = (
+            eval_prompt + "\n\n"
+            "原文参考:\n" + context_text + "\n\n"
+            "玩家回答: " + answer + "\n\n"
+            "你扮演严格导师 - 一位严谨的语文老师, 重点看文本关联/真诚度/世界观.\n"
+            "评分时严格要求, 不要放过含糊不清的表述.\n"
+            "只输出一行: 评分: <0-100> 你的反馈"
+        )
+
+        # 4. 并发调两个 agent
+        import re
+        async def get_score(prompt: str, role: str):
+            sys_prompt = (
+                "你是温暖姐姐 + 语文老师, 5 维度评分, 先肯定再说建议, 最后一句鼓励. 绝不用 你的回答很好 等套话."
+                if role == "warm"
+                else "你是严格的语文老师, 评分必须基于原文, 不接受套话和空话."
+            )
+            text, _ = self.llm.call(sys_prompt, prompt, max_tokens=300)
+            m = re.search(r"(\d+)", text)
+            score = int(m.group(1)) if m else 50
+            return min(100, max(0, score)), text
+
+        warm_score, warm_text = await get_score(warm_msg, "warm")
+        strict_score, strict_text = await get_score(strict_msg, "strict")
+
+        # 5. 调解综合 (宽松 4 : 严格 6)
+        final_score = int(warm_score * 0.4 + strict_score * 0.6)
+
+        # 6. 反馈 = 两个评分员 + 最终分
+        feedback = (
+            "[温柔姐姐] (" + str(warm_score) + "/100): " + warm_text.strip() + "\n\n"
+            "[严格导师] (" + str(strict_score) + "/100): " + strict_text.strip() + "\n\n"
+            "---\n\n"
+            "最终评分: " + str(final_score) + "/100"
+        )
+
+        return (final_score, feedback)
+
 
     def _get_scene(self, scene_id: str) -> Optional[dict]:
         for s in self.state['script'].get('scenes', []):

@@ -107,6 +107,23 @@ def get_script(book_id: int) -> Optional[dict]:
     return scripts[0].get('script_json')
 
 
+def list_scripts(book_id: int) -> list:
+    """列某本书所有剧本 (chapter_index + game_type + n_scenes)"""
+    mcp = get_mcp()
+    result = mcp.call('get_script', {'book_id': book_id, 'game_type': 'v2_mixed'})
+    scripts = mcp.parse(result)
+    out = []
+    for s in (scripts or []):
+        sj = s.get('script_json', {})
+        out.append({
+            'chapter_index': s.get('chapter_index', 0),
+            'game_type': s.get('game_type', ''),
+            'n_scenes': len(sj.get('scenes', [])),
+            'script_json': sj,
+        })
+    return out
+
+
 def semantic_search(query: str, top_k: int = 5, book_id: Optional[int] = None) -> list:
     mcp = get_mcp()
     args = {'query': query, 'top_k': top_k}
@@ -137,45 +154,127 @@ def search_books(query: str, limit: int = 20) -> list:
 # ============== 评分（封装 deep_agent._evaluate_answer） ==============
 
 def evaluate_answer(question: dict, answer: str, book_id: int) -> tuple[int, str]:
-    """OE 题评分：先 semantic_search 原文，再用 LLM 5 维度评分"""
+    """OE 题评分：调 deep_agent._debate_evaluate 多 Agent 协同评分
+
+    3 个评分员: 温柔姐姐 + 严格导师 + 调解人
+    - 温柔姐姐看深度/独特性 (宽容)
+    - 严格导师看文本关联/真诚度 (严格)
+    - 调解人综合两者加权 (40:60)
+
+    Fallback: 若 deep_agent 初始化失败，退回单 LLM 直评
+    """
+    try:
+        return asyncio.run(_debate_evaluate_async(question, answer, book_id))
+    except Exception as e:
+        return _simple_evaluate_fallback(question, answer, book_id, e)
+
+
+async def _debate_evaluate_async(question: dict, answer: str, book_id: int) -> tuple[int, str]:
+    """调 deep_agent._debate_evaluate 多 Agent 评分"""
+    import sys
+    from pathlib import Path as P
+    sys.path.insert(0, str(P(__file__).parent.parent / 'agent'))
+
+    from llm_client import LLMClient
+    from config_loader import load_config
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    config = load_config()
+    llm = LLMClient(config['llm'])
+
+    # MCP stdio 起 server (web 容器里脚本路径是 /app/scripts)
+    mcp_params = StdioServerParameters(
+        command='python',
+        args=['/app/scripts/mcp_server.py'],
+    )
+
+    async with stdio_client(mcp_params) as (r, w):
+        async with ClientSession(r, w) as session:
+            await session.initialize()
+            from deep_agent import ScriptKillerAgent
+            agent = ScriptKillerAgent(book_id=book_id, llm_client=llm, mcp_session=session)
+            return await agent._debate_evaluate(question, answer)
+
+
+def _simple_evaluate_fallback(question: dict, answer: str, book_id: int, prev_err) -> tuple[int, str]:
+    """DeepAgent 失败时的单 LLM 评分 fallback"""
     try:
         from llm_client import LLMClient
         from config_loader import load_config
         config = load_config()
         llm = LLMClient(config['llm'])
     except Exception as e:
-        return (50, f'（LLM 未配置，跳过评分: {e}）')
+        return (50, f'(LLM 未配置, 跳过评分: {e})')
 
-    # 1. semantic_search 查原文
     query = answer[:30] if len(answer) > 30 else answer
     context_chunks = semantic_search(query, top_k=2, book_id=book_id)
     context_text = '\n'.join(c.get('preview', '') for c in context_chunks[:2])
+    eval_prompt = question.get('evaluation_prompt', '5 维度评分')
 
-    # 2. LLM 评分（同步调用，因为 streamlit 在主线程）
-    eval_prompt = question.get('evaluation_prompt', '5 维度评分 (深度/独特性/文本关联/真诚度/世界观)')
-    user_msg = f'''{eval_prompt}
-
-原文参考:
-{context_text}
-
-玩家回答: {answer}
-
-请评分 (0-100), 然后给一句温暖鼓励。'''
+    user_msg = (
+        eval_prompt + '\n\n原文参考:\n' + context_text + '\n\n玩家回答: ' + answer
+        + '\n\n请评分 (0-100), 然后给一句温暖鼓励.'
+    )
 
     try:
-        # llm_client.call 本身就是同步（用 requests）
         text, _ = llm.call(
-            '你是温暖姐姐 + 语文老师, 5 维度评分, 先肯定再说建议, 最后一句鼓励。绝不用"你的回答很好"等套话。',
-            user_msg,
-            max_tokens=300,
+            "你是温暖姐姐 + 语文老师, 5 维度评分, 先肯定再说建议, 最后一句鼓励. 绝不用 你的回答很好 等套话.",
+            user_msg, max_tokens=300,
         )
     except Exception as e:
-        return (50, f'（LLM 调用失败: {e}）')
+        return (50, f'(LLM 调用失败: {e}; deep_agent 错误: {prev_err})')
 
     import re
     m = re.search(r'(\d+)', text)
     score = int(m.group(1)) if m else 50
     return (min(100, max(0, score)), text)
+
+
+# ============== 在线 TTS (edge-tts) ==============
+
+def tts_generate(text: str, voice: str = 'zh-CN-XiaoxiaoNeural', rate: str = '+0%') -> Optional[bytes]:
+    """在线生成 TTS 音频 (edge-tts 免费, 不要 key)
+    
+    Returns: mp3 bytes or None (失败时)
+    """
+    try:
+        import edge_tts
+        import asyncio
+        
+        async def _gen():
+            communicate = edge_tts.Communicate(text, voice, rate=rate)
+            buf = bytearray()
+            async for chunk in communicate.stream():
+                if chunk['type'] == 'audio':
+                    buf.extend(chunk['data'])
+            return bytes(buf)
+        
+        return asyncio.run(_gen())
+    except Exception as e:
+        print(f'TTS 失败: {e}')
+        return None
+
+
+def render_tts_button(text: str, key: str, voice_label: str = '🎙️ 听旁白', voice: str = 'zh-CN-XiaoxiaoNeural', rate: str = '+0%'):
+    """渲染 TTS 按钮 + 音频播放 (用 cache 避免重复生成)
+"""
+    if not text or not text.strip():
+        return
+    cache_key = f'tts_{key}_{voice}_{rate}_{hash(text)}'
+    if cache_key in st.session_state:
+        audio_bytes = st.session_state[cache_key]
+        if audio_bytes:
+            st.audio(audio_bytes, format='audio/mp3', autoplay=False)
+            return
+    if st.button(voice_label, key=f'btn_{key}'):
+        with st.spinner('生成语音...'):
+            audio_bytes = tts_generate(text, voice, rate)
+        if audio_bytes:
+            st.session_state[cache_key] = audio_bytes
+            st.audio(audio_bytes, format='audio/mp3', autoplay=True)
+        else:
+            st.warning('TTS 生成失败')
 
 
 # ============== Streamlit 页面 ==============
@@ -192,7 +291,18 @@ with st.sidebar:
     st.markdown('# 📚 玖玖书塔')
     st.caption('jiujiu-bookstack · v0.2.0')
     st.divider()
-    page = st.radio('导航', ['🏠 首页', '🎮 剧本杀', '🔍 搜索', '📖 书详情'], index=0)
+    # 处理强制跳转 (主页"玩剧本"按钮触发)
+    pages = ['🏠 首页', '🎮 剧本杀', '🔍 搜索', '📖 书详情']
+    default_idx = 0
+    if st.session_state.get('force_page'):
+        try:
+            default_idx = pages.index(st.session_state['force_page'])
+        except ValueError:
+            default_idx = 0
+    page = st.radio('导航', pages, index=default_idx)
+    # 消费掉 force_page
+    if st.session_state.get('force_page'):
+        st.session_state.pop('force_page', None)
     st.divider()
 
     # 显示库统计
@@ -220,10 +330,13 @@ if page == '🏠 首页':
     st.subheader('📊 分类分布')
     try:
         cats = list_categories()
-        cols = st.columns(min(6, len(cats)))
-        for i, cat in enumerate(cats[:12]):
-            with cols[i % 6]:
-                st.metric(cat.get('category', '?'), cat.get('count', 0))
+        if not cats:
+            st.info('尚无分类数据 — 跑一次 pipeline 后会显示')
+        else:
+            cols = st.columns(min(6, max(1, len(cats))))
+            for i, cat in enumerate(cats[:12]):
+                with cols[i % 6]:
+                    st.metric(cat.get('category', '?'), cat.get('count', 0))
     except Exception as e:
         st.error(str(e))
 
@@ -236,6 +349,11 @@ if page == '🏠 首页':
         sel_cat = st.selectbox('筛选分类', cat_list)
         books = list_books(category=sel_cat if sel_cat != '全部' else None, limit=100)
 
+        # 过滤: 只显示有剧本的书 (用户的书架 = 可玩剧本的列表)
+        books = [b for b in books if b.get('has_script')]
+        if not books:
+            st.info('书架上还没有可玩的剧本。请先生成 pipeline (在分类页 / 处理新书)。')
+            st.stop()
         # 分两列展示
         for i in range(0, len(books), 2):
             cols = st.columns(2)
@@ -249,10 +367,16 @@ if page == '🏠 首页':
                             st.caption(f"分类: {cat} · ID: {b.get('id', '?')}")
                             if b.get('summary'):
                                 st.caption(b['summary'][:150] + ('...' if len(b.get('summary', '')) > 150 else ''))
-                            if st.button('🎮 玩剧本', key=f"play_{b.get('id', i+j)}"):
-                                st.session_state['selected_book_id'] = b.get('id')
-                                st.session_state['selected_book_name'] = b.get('name')
-                                st.rerun()
+                            # 没剧本的书: 不能玩, 提示先生成
+                            if not b.get('has_script'):
+                                st.button('🚧 暂无剧本', key=f"no_play_{b.get('id', i+j)}", disabled=True, help='先生成 pipeline 再玩')
+                            else:
+                                if st.button('🎮 玩剧本', key=f"play_{b.get('id', i+j)}"):
+                                    st.session_state['selected_book_id'] = b.get('id')
+                                    st.session_state['selected_book_name'] = b.get('name')
+                                    # 跳到剧本杀页
+                                    st.session_state['force_page'] = '🎮 剧本杀'
+                                    st.rerun()
     except Exception as e:
         st.error(f'书单加载失败: {e}')
 
@@ -279,19 +403,59 @@ elif page == '🎮 剧本杀':
 
     if st.session_state.game_book_id is None:
         st.markdown('### 👇 选一本书开始玩')
-        book_options = {f"{b.get('name', '?')} (ID={b.get('id')})": b.get('id') for b in books if b.get('id')}
-        sel = st.selectbox('选书', list(book_options.keys()))
+        # 只列有剧本的书
+        playable_books = [b for b in books if b.get('has_script') and b.get('id')]
+        if not playable_books:
+            st.warning('📭 库里还没有任何书生成剧本。请先生成 pipeline (在首页跑分类 / 处理新书)。')
+            st.stop()
+        book_options = {f"{b.get('name', '?')} (ID={b.get('id')})": b for b in playable_books}
+        # 默认从主页传来的书
+        default_idx = 0
+        sel_id = st.session_state.get('selected_book_id')
+        for i, (_, b) in enumerate(book_options.items()):
+            if b.get('id') == sel_id:
+                default_idx = i
+                break
+        sel_label = st.selectbox('选书', list(book_options.keys()), index=default_idx)
+        sel_book = book_options[sel_label]
+        # 取这本书所有剧本 (一本书可能多 chapter, 比如福尔摩斯全集每册一个)
+        scripts_list = list_scripts(sel_book['id'])
+        if not scripts_list:
+            st.warning('这本书还没有生成剧本。')
+            st.stop()
+        # 多剧本时, 让玩家选 chapter
+        if len(scripts_list) > 1:
+            chapter_labels = [f"第 {s['chapter_index']+1} 册 ({s['n_scenes']} 场景)" for s in scripts_list]
+            ch_idx = st.selectbox('📖 选要玩的章节', range(len(chapter_labels)), format_func=lambda i: chapter_labels[i])
+            sel_script = scripts_list[ch_idx]['script_json']
+        else:
+            sel_script = scripts_list[0]['script_json']
+        # 选角色 - 从 sel_script._player_role_options 或 抽 role_perspective
+        script_for_roles = sel_script
+        role_options = (script_for_roles or {}).get('_player_role_options', [])
+        if not role_options:
+            seen = set()
+            for sc in (script_for_roles or {}).get('scenes', []):
+                for q in sc.get('questions', []):
+                    rp = q.get('role_perspective', '').strip()
+                    if rp:
+                        seen.add(rp)
+            role_options = sorted(seen) or ['华生', '福尔摩斯', '读者 (上帝视角)']
+        chosen_role = st.selectbox('🎭 选你要扮演的角色', role_options, help='不同角色看到不同剧情角度')
         if st.button('🚀 开始玩'):
-            st.session_state.game_book_id = book_options[sel]
-            st.session_state.game_book_name = sel.split(' (ID=')[0]
+            st.session_state.game_book_id = sel_book['id']
+            st.session_state.game_book_name = sel_book['name']
+            st.session_state.player_role = chosen_role
             # 加载剧本
             with st.spinner('加载剧本...'):
-                script = get_script(st.session_state.game_book_id)
+                script = sel_script
                 if script:
                     st.session_state.game_script = script
                     st.session_state.game_scene_idx = 0
                     st.session_state.game_history = []
                     st.session_state.game_ended = False
+                    # 清掉主页的 selected_book_id
+                    st.session_state.pop('selected_book_id', None)
                 else:
                     st.error('该书没有剧本（先生成再玩）')
                     st.session_state.game_book_id = None
@@ -299,7 +463,8 @@ elif page == '🎮 剧本杀':
     else:
         # 显示当前书
         book_id = st.session_state.game_book_id
-        st.markdown(f"### 📖 《{st.session_state.game_book_name}》")
+        player_role = st.session_state.get('player_role', '读者')
+        st.markdown(f"### 📖 《{st.session_state.game_book_name}》  ·  🎭 你扮演: **{player_role}**")
         if st.button('🔄 重玩 / 换书'):
             st.session_state.game_book_id = None
             st.session_state.game_script = None
@@ -331,12 +496,44 @@ elif page == '🎮 剧本杀':
                 # 场景描述
                 with st.container(border=True):
                     st.markdown(f"#### 🎬 场景 {idx+1}/{len(scenes)}: {scene.get('title', '?')}")
+                    scene_role = scene.get('player_role', '')
+                    player_role_now = st.session_state.get('player_role', '')
+                    if scene_role:
+                        st.caption(f"📖 场景视角: {scene_role}")
+                    if player_role_now and player_role_now != scene_role:
+                        st.caption(f"🎭 你扮演: **{player_role_now}** (替换场景中的 你)")
                     if scene.get('act'):
                         st.caption(f"幕: {scene['act']}")
                     if scene.get('narrator_intro'):
                         st.info(scene['narrator_intro'])
                     if scene.get('description'):
                         st.markdown(f"> {scene['description']}")
+                    # 世界状态条（剧情推进感）
+                    ws = scene.get('world_state', {})
+                    if ws:
+                        cols = st.columns(min(4, len(ws)))
+                        for i, (k, v) in enumerate(ws.items()):
+                            cols[i % len(cols)].metric(k, str(v))
+                    # 🎙️ TTS 旁白按钮 (在线 edge-tts, 不要 key)
+                    narrator_text = scene.get('narrator_intro', '').strip()
+                    if narrator_text:
+                        render_tts_button(
+                            narrator_text,
+                            key=f'narrator_{idx}',
+                            voice_label='🎙️ 听旁白 (晓晓)',
+                            voice='zh-CN-XiaoxiaoNeural',
+                            rate='-10%',  # 慢一点更有沉浸感
+                        )
+                    # 描述也提供语音版
+                    desc_text = scene.get('description', '').strip().lstrip('>').strip()
+                    if desc_text and len(desc_text) < 500:
+                        render_tts_button(
+                            desc_text,
+                            key=f'desc_{idx}',
+                            voice_label='🎙️ 听场景描述 (云希 男声)',
+                            voice='zh-CN-YunxiNeural',
+                            rate='-5%',
+                        )
 
                 # 处理该场景的所有问题
                 questions = scene.get('questions', [])
@@ -355,27 +552,68 @@ elif page == '🎮 剧本杀':
 
                 if q_idx < len(questions):
                     q = questions[q_idx]
-                    st.markdown(f"##### 问题 {q_idx+1}/{len(questions)} · `{q.get('type', '?')}`")
+                    q_type = q.get('type', '?')
+                    type_label = {
+                        'choice': '🎭 剧情分支',
+                        'comprehension_mc': '📖 理解题',
+                        'open_ended': '💬 开放题',
+                        'inference_mc': '🔍 推理题',
+                    }.get(q_type, q_type)
+                    st.markdown(f"##### 问题 {q_idx+1}/{len(questions)} · {type_label}")
+                    # choice 题加一句提示
+                    if q_type == 'choice':
+                        st.caption("💡 你的选择会决定剧情走向")
                     st.markdown(f"**{q.get('question', '')}**")
 
-                    if q.get('type') == 'comprehension_mc':
-                        # 单选题
+                    if q.get('type') in ('comprehension_mc', 'choice', 'inference_mc'):
+                        # 单选题 / 剧情分支
                         opts = q.get('options', [])
                         if not opts:
                             st.warning('该题没有选项，跳过')
                             st.session_state.scene_q_idx += 1
                             st.rerun()
-                        ans = st.radio('选择', [f"{chr(65+i)}. {o}" for i, o in enumerate(opts)], key=f'q_{idx}_{q_idx}')
+                        # 兼容两种存储方式: ["A. xxx", "B. xxx"] 或 ["xxx", "yyy"]
+                        display_opts = []
+                        for i, o in enumerate(opts):
+                            o_str = str(o).strip()
+                            # 如果 LLM 已加"A. "前缀，去重避免"A. A. xxx"
+                            if o_str[:2] in ('A.', 'B.', 'C.', 'D.', 'E.') and o_str[1:3].strip() == '.':
+                                display_opts.append(o_str)
+                            else:
+                                display_opts.append(f"{chr(65+i)}. {o_str}")
+                        ans = st.radio('选择', display_opts, key=f'q_{idx}_{q_idx}')
                         # 取首字母
                         choice = ans.split('.')[0].strip()
                         if st.button('提交答案'):
-                            correct = q.get('correct', '').upper()
-                            is_correct = choice == correct
-                            score = 100 if is_correct else 0
-                            feedback = q.get('explanation', '')
+                            if q.get('type') == 'comprehension_mc':
+                                correct = q.get('correct', '').upper()
+                                is_correct = choice == correct
+                                score = 100 if is_correct else 0
+                                feedback = q.get('explanation', '')
+                                ans_type = 'mc'
+                            elif q.get('type') == 'inference_mc':
+                                correct = q.get('correct', '').upper()
+                                is_correct = choice == correct
+                                score = 100 if is_correct else 0
+                                feedback = q.get('explanation', '')
+                                ans_type = 'mc'
+                            else:
+                                # choice 剧情分支：不判对错，只推动剧情
+                                score = 100  # 参与就有分
+                                idx_opt = ord(choice) - ord('A')
+                                consequences = q.get('consequences') or q.get('consequence')
+                                if isinstance(consequences, list) and idx_opt < len(consequences):
+                                    feedback = consequences[idx_opt]
+                                elif isinstance(consequences, str) and consequences:
+                                    feedback = consequences
+                                else:
+                                    # 兑底：依选项生成不同的剧情后果
+                                    feedback = f"你选择了【{choice}】，剧情继续推进..."
+                                ans_type = 'choice'
+                                correct = None
                             st.session_state.scene_answers.append({
                                 'question': q.get('question'),
-                                'type': 'mc',
+                                'type': ans_type,
                                 'answer': choice,
                                 'correct': correct,
                                 'score': score,
@@ -402,17 +640,30 @@ elif page == '🎮 剧本杀':
                                 st.session_state.scene_q_idx += 1
                                 st.rerun()
 
-                    # 显示上一题反馈
+                    # 显示上一题反馈（仅提交后）
                     if st.session_state.scene_answers and q_idx > 0:
                         last = st.session_state.scene_answers[-1]
                         with st.container(border=True):
+                            # 反馈语音
+                            feedback_text = last.get('feedback', '').strip()
+                            if feedback_text and len(feedback_text) < 500:
+                                render_tts_button(
+                                    feedback_text,
+                                    key=f'fb_{idx}_{q_idx}',
+                                    voice_label='🎙️ 听反馈',
+                                    voice='zh-CN-XiaoxiaoNeural',
+                                    rate='+0%',
+                                )
                             if last['type'] == 'mc':
                                 if last.get('correct') == last.get('answer'):
                                     st.success(f"✅ 正确! {last.get('feedback', '')}")
                                 else:
                                     st.error(f"❌ 正确答案是 {last.get('correct')}. {last.get('feedback', '')}")
-                            else:
+                            elif last['type'] == 'oe':
                                 st.info(f"📊 评分: **{last.get('score', 0)}/100**\n\n{last.get('feedback', '')}")
+                            elif last['type'] == 'choice':
+                                # 剧情分支：只叙述后果 + 不打分了
+                                st.info(f"🎬 剧情分支结果\n\n{last.get('feedback', '')}")
                 else:
                     # 当前场景所有题答完，进入下一场景
                     st.session_state.game_history.extend(st.session_state.scene_answers)
