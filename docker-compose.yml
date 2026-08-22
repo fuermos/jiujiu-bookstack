@@ -1,26 +1,41 @@
-# jiujiu-bookstack 一键启动
+# jiujiu-bookstack 一键启动 (单文件整合: DB + app + web)
 #
-# 首次使用:
-#   1. cp config/config.example.yaml config/config.yaml  # 填 API Key
-#   2. docker-compose up -d                              # 起服务 (PG + app + web)
-#   3. 浏览器访问 http://localhost:8501                   # 打开 Web UI 玩剧本杀
+# 启动:
+#   docker-compose up -d
+#   浏览器打开 http://localhost:8501
 #
-# 命令行玩剧本杀:
-#   docker-compose exec app python agent/deep_agent.py --book-id 1 --interactive
+# 环境变量 (可选, 已默认填好):
+#   MINIMAX_API_KEY   - MiniMax LLM API Key (剧本生成主模型)
+#   LLM_FALLBACK_URL  - 本地 LLM fallback 地址 (默认 192.168.0.14:2345)
+#
+# 数据持久化:
+#   pgdata          - PostgreSQL 数据 (volume)
+#   ./books         - 书库 (epub 文件)
+#   ./mindmaps      - 思维导图 PNG/mmd
+#   ./tts           - TTS 音频缓存
+#   ./data/covers   - epub 封面图片
 #
 # 跑流水线 (导入 epub):
-#   docker-compose exec app python scripts/pipeline.py /app/books/
+#   cp my_book.epub books/
+#   docker-compose exec app python /app/scripts/pipeline.py /app/books/
+#
+# 命令行玩剧本杀:
+#   docker-compose exec app python /app/agent/deep_agent.py --book-id 1 --interactive
+#
+# 挂载到已有 PG (手动部署):
+#   psql -U admin -d jiujiu_mind -f config/init_db.sql
 
 services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: jiujiu-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_PASSWORD: changeme
-      POSTGRES_USER: admin
-      POSTGRES_DB: jiujiu_mind
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_pwd_change_me}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_DB: ${POSTGRES_DB:-jiujiu_mind}
     ports:
-      - "15433:5432"
+      - "15433:5432"     # 暴露给宿主机，方便备份/调试
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./config/init_db.sql:/docker-entrypoint-initdb.d/01-init.sql
@@ -34,6 +49,7 @@ services:
     build: .
     image: jiujiu-bookstack:latest
     container_name: jiujiu-bookstack-app
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -41,10 +57,10 @@ services:
       DB_HOST: postgres          # 容器内走服务名
       DB_PORT: 5432
       DB_USER: admin
-      DB_PASSWORD: changeme
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres_pwd_change_me}
       DB_NAME: jiujiu_mind
-      LLM_PRIMARY_API_KEY: ${MINIMAX_BACKUP_API_KEY:-}    # 用宿主已有的 MiniMax key
-      MINIMAX_API_KEY: ${MINIMAX_BACKUP_API_KEY:-}        # config-docker.yaml ${MINIMAX_API_KEY} 替换
+      LLM_PRIMARY_API_KEY: ${MINIMAX_API_KEY:-}    # 宿主已有的 MiniMax key
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}        # config-docker.yaml 用 ${MINIMAX_API_KEY} 替换
     volumes:
       # 用 docker 专用配置 (host: postgres) 覆盖，不污染宿主 config.yaml
       - ./config/config-docker.yaml:/app/config/config.yaml:ro
@@ -53,10 +69,10 @@ services:
       - ./config/init_db.sql:/app/config/init_db.sql:ro
       - ./books:/app/books               # 书库
       - ./mindmaps:/app/mindmaps         # 思维导图产物
-      - ./tts:/app/tts                   # TTS 音频产物
-      - ./data:/app/data                 # 敏词库等运行数据
+      - ./tts:/app/tts                   # TTS 音频缓存
+      - ./data:/app/data                 # 敏词库 + 封面
       - ./logs:/app/logs
-      # 调试热重载：源码挂载进去，改文件不需重 build（生成代码时优先挂载，调试生效）
+      # 调试热重载：源码挂载进去，改文件不需重 build
       - ./scripts:/app/scripts
       - ./agent:/app/agent
       - ./web:/app/web
@@ -64,23 +80,25 @@ services:
     command: ["sleep", "infinity"]
 
   web:
+    build: .
     image: jiujiu-bookstack:latest    # 复用 app 镜像（代码一致）
     container_name: jiujiu-bookstack-web
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       app:
-        condition: service_started    # 等 app 起, 但不强求健康
+        condition: service_started
     environment:
-      LLM_PRIMARY_API_KEY: ${MINIMAX_BACKUP_API_KEY:-}    # 复用宿主已有的 MiniMax key
-      MINIMAX_API_KEY: ${MINIMAX_BACKUP_API_KEY:-}        # 容器内 config-docker.yaml 用这个
+      LLM_PRIMARY_API_KEY: ${MINIMAX_API_KEY:-}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
     volumes:
-      # 用 docker 专用配置 (host: postgres) 覆盖到容器内，不污染宿主的 config.yaml
+      # 用 docker 专用配置 (host: postgres) 覆盖
       - ./config/config-docker.yaml:/app/config/config.yaml:ro
-      # 其他数据仍共享
       - ./config/sensitive_words.json:/app/config/sensitive_words.json:ro
       - ./config/category_rules.yaml:/app/config/category_rules.yaml:ro
       - ./config/init_db.sql:/app/config/init_db.sql:ro
+      # 数据共享 (web 需要读封面 / mindmap / tts)
       - ./books:/app/books
       - ./mindmaps:/app/mindmaps
       - ./tts:/app/tts
