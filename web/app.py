@@ -35,6 +35,15 @@ from user_manager import (
     save_progress, load_progress, list_user_history, delete_progress,
 )
 
+# 初始化 DB 连接池 (user_manager 直连 DB)
+from db import init_pool as _init_db_pool
+from config_loader import load_config as _load_cfg
+try:
+    _cfg = _load_cfg()
+    _init_db_pool(_cfg['database'])
+except Exception as _e:
+    print(f'⚠️ DB pool init 失败: {_e}')
+
 
 # ============== MCP 连接管理 ==============
 
@@ -516,10 +525,14 @@ elif page == '🎮 剧本杀':
                 with cols[j]:
                     with st.container(border=True):
                         # 封面 (优先本地文件, 缺失用 emoji 占位)
-                        cover_path = ROOT / 'data' / (b.get('cover_url') or '')
+                        cover_url = b.get('cover_url')
                         cat = b.get('category') or '其他'
-                        if cover_path.exists():
-                            st.image(str(cover_path), use_container_width=True)
+                        if cover_url:
+                            cover_path = ROOT / 'data' / cover_url
+                            if cover_path.is_file():
+                                st.image(str(cover_path), use_container_width=True)
+                            else:
+                                st.markdown(f'<div style="text-align:center;font-size:5em">{cat_emoji.get(cat, "📘")}</div>', unsafe_allow_html=True)
                         else:
                             st.markdown(f'<div style="text-align:center;font-size:5em">{cat_emoji.get(cat, "📘")}</div>', unsafe_allow_html=True)
                         st.markdown(f"**{b.get('name', '?')}**")
