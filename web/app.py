@@ -30,6 +30,10 @@ sys.path.insert(0, str(ROOT / 'agent'))
 # MCP stdio client
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from user_manager import (
+    register_user, login_user, get_user,
+    save_progress, load_progress, list_user_history, delete_progress,
+)
 
 
 # ============== MCP 连接管理 ==============
@@ -305,6 +309,21 @@ with st.sidebar:
         st.session_state.pop('force_page', None)
     st.divider()
 
+    # 用户登录状态
+    if 'current_user' not in st.session_state:
+        st.session_state.current_user = None
+    user = st.session_state.get('current_user')
+    if user:
+        st.markdown(f"### 👤 {user['nickname']}")
+        st.caption(f"📧 {user['email']}")
+        if st.button('🚪 退出登录', use_container_width=True):
+            st.session_state.current_user = None
+            st.session_state.game_book_id = None
+            st.rerun()
+    else:
+        st.caption('🔓 未登录')
+    st.divider()
+
     # 显示库统计
     try:
         stats = get_book_stats()
@@ -317,6 +336,47 @@ with st.sidebar:
             st.metric('剧本数', stats['total_scripts'])
     except Exception as e:
         st.error(f'统计加载失败: {e}')
+
+
+def render_auth_form():
+    """邮箱注册/登录 (主人 2026-08-22 钦定: 邮箱注册 + 简单验证)"""
+    tab_login, tab_register = st.tabs(['登录', '注册'])
+
+    with tab_login:
+        with st.form('login_form'):
+            email = st.text_input('邮箱', key='login_email')
+            pwd = st.text_input('密码', type='password', key='login_pwd')
+            if st.form_submit_button('🔓 登录', type='primary'):
+                if not email or not pwd:
+                    st.error('请填邮箱和密码')
+                else:
+                    res = login_user(email, pwd)
+                    if 'error' in res:
+                        st.error(res['error'])
+                    else:
+                        st.session_state.current_user = res
+                        st.success(f'✅ 欢迎回来 {res["nickname"]}!')
+                        st.rerun()
+
+    with tab_register:
+        with st.form('register_form'):
+            email = st.text_input('邮箱', key='reg_email', help='例如：me@163.com')
+            nickname = st.text_input('昵称 (可选)', key='reg_nick', help='默认用邮箱前缀')
+            pwd = st.text_input('密码', type='password', key='reg_pwd', help='至少 6 位')
+            pwd2 = st.text_input('确认密码', type='password', key='reg_pwd2')
+            if st.form_submit_button('🎉 注册', type='primary'):
+                if not email or not pwd:
+                    st.error('请填邮箱和密码')
+                elif pwd != pwd2:
+                    st.error('两次密码不一致')
+                else:
+                    res = register_user(email, pwd, nickname)
+                    if 'error' in res:
+                        st.error(res['error'])
+                    else:
+                        st.session_state.current_user = res
+                        st.success(f'✅ 注册成功, 欢迎 {res["nickname"]}!')
+                        st.rerun()
 
 
 # ====== 页面：首页 ======
@@ -364,7 +424,7 @@ if page == '🏠 首页':
                         with st.container(border=True):
                             st.markdown(f"**{b.get('name', '?')}**")
                             cat = b.get('category', '?')
-                            st.caption(f"分类: {cat} · ID: {b.get('id', '?')}")
+                            st.caption(f"分类: {cat}")
                             if b.get('summary'):
                                 st.caption(b['summary'][:150] + ('...' if len(b.get('summary', '')) > 150 else ''))
                             # 没剧本的书: 不能玩, 提示先生成
@@ -385,14 +445,20 @@ if page == '🏠 首页':
 elif page == '🎮 剧本杀':
     st.title('🎮 剧本杀 · 玩转一本书')
 
-    # 选书
+    # ========= 1. 未登录拦截 =========
+    if not st.session_state.get('current_user'):
+        st.warning('🔒 请先登录/注册才能玩剧本杀')
+        render_auth_form()
+        st.stop()
+
+    # ========= 2. 加载所有书 =========
     try:
         books = list_books(limit=200)
     except Exception as e:
         st.error(f'加载书单失败: {e}')
         books = []
 
-    # 用 session_state 记住选中的书
+    # ========= 3. session_state 初始化 =========
     if 'game_book_id' not in st.session_state:
         st.session_state.game_book_id = None
         st.session_state.game_book_name = None
@@ -400,105 +466,167 @@ elif page == '🎮 剧本杀':
         st.session_state.game_scene_idx = 0
         st.session_state.game_history = []
         st.session_state.game_ended = False
+    if 'selected_book_id' not in st.session_state:
+        st.session_state.selected_book_id = None
+    if 'selected_script_id' not in st.session_state:
+        st.session_state.selected_script_id = None
+    if 'show_script_modal' not in st.session_state:
+        st.session_state.show_script_modal = False
 
+    # ========= 4. 主页未开始: 平铺书 + 封面 =========
     if st.session_state.game_book_id is None:
-        st.markdown('### 👇 选一本书开始玩')
-        # 只列有剧本的书
+        st.markdown('### 📚 选一本书进入剧本杀')
         playable_books = [b for b in books if b.get('has_script') and b.get('id')]
         if not playable_books:
-            st.warning('📭 库里还没有任何书生成剧本。请先生成 pipeline (在首页跑分类 / 处理新书)。')
+            st.warning('📭 库里还没有任何书生成剧本。请先生成 pipeline。')
             st.stop()
-        book_options = {f"{b.get('name', '?')} (ID={b.get('id')})": b for b in playable_books}
-        # 默认从主页传来的书
-        default_idx = 0
-        sel_id = st.session_state.get('selected_book_id')
-        for i, (_, b) in enumerate(book_options.items()):
-            if b.get('id') == sel_id:
-                default_idx = i
-                break
-        # 平铺选书: 毎个书一个 button (主人 2026-08-22 钓定: 不要用 selectbox, 平铺)
-        st.markdown('### 📚 选书')
-        book_names = list(book_options.keys())
-        n_cols = min(4, len(book_names))
-        cols = st.columns(n_cols)
-        for i, (label, b) in enumerate(book_options.items()):
-            with cols[i % n_cols]:
-                btn_type = 'primary' if i == default_idx else 'secondary'
-                if st.button(label, key=f'book_{b["id"]}', use_container_width=True, type=btn_type):
-                    st.session_state.selected_book_id = b['id']
-                    st.rerun()
-        sel_book = book_options[book_names[default_idx]]
-        if st.session_state.get('selected_book_id') and st.session_state.selected_book_id != sel_book['id']:
-            sel_book = next((b for b in playable_books if b['id'] == st.session_state.selected_book_id), sel_book)
-        # 取这本书所有剧本 (一本书可能多 chapter, 比如福尔摩斯全集每册一个)
-        scripts_list = list_scripts(sel_book['id'])
-        if not scripts_list:
-            st.warning('这本书还没有生成剧本。')
-            st.stop()
-        # 多剧本时, 平铺按钮选 chapter
-        if len(scripts_list) > 1:
-            st.markdown('### 📖 选剧本 (每本书多剧本)')
-            n_cols = min(3, len(scripts_list))
-            cols = st.columns(n_cols)
-            sel_script = None
-            for i, s in enumerate(scripts_list):
-                with cols[i % n_cols]:
-                    label = f"第 {s['chapter_index']+1} 册\n{s['n_scenes']} 场景"
-                    if st.button(label, key=f'ch_{s["id"]}', use_container_width=True):
-                        st.session_state.selected_script_id = s['id']
-                        st.rerun()
-            # 默认选上次选的或第一个
-            sel_sid = st.session_state.get('selected_script_id')
-            target = next((s for s in scripts_list if s['id'] == sel_sid), scripts_list[0])
-            sel_script = target['script_json']
-        else:
-            sel_script = scripts_list[0]['script_json']
-        # 选角色 - 从 sel_script._player_role_options 或 抽 role_perspective
-        script_for_roles = sel_script
-        role_options = (script_for_roles or {}).get('_player_role_options', [])
-        if not role_options:
-            seen = set()
-            for sc in (script_for_roles or {}).get('scenes', []):
-                for q in sc.get('questions', []):
-                    rp = q.get('role_perspective', '').strip()
-                    if rp:
-                        seen.add(rp)
-            role_options = sorted(seen) or ['华生', '福尔摩斯', '读者 (上帝视角)']
-        # 平铺选角色 (主人 2026-08-22 钓定: 不要 selectbox, 平铺下拉方便选择)
-        st.markdown('### 🎭 选你要扮演的角色')
-        # 上次选的角色
-        prev_role = st.session_state.get('player_role', role_options[0])
-        # 默认选默认第一个
-        if 'player_role_radio' not in st.session_state or st.session_state.player_role_radio not in role_options:
-            st.session_state.player_role_radio = prev_role if prev_role in role_options else role_options[0]
-        chosen_role = st.session_state.player_role_radio
-        n_cols = min(4, len(role_options))
-        cols = st.columns(n_cols)
-        for i, role in enumerate(role_options):
-            with cols[i % n_cols]:
-                btn_type = 'primary' if role == chosen_role else 'secondary'
-                if st.button(role, key=f'role_{i}_{role}', use_container_width=True, type=btn_type):
-                    st.session_state.player_role_radio = role
-                    chosen_role = role
-                    st.rerun()
-        if st.button('🚀 开始玩'):
-            st.session_state.game_book_id = sel_book['id']
-            st.session_state.game_book_name = sel_book['name']
-            st.session_state.player_role = chosen_role
-            # 加载剧本
-            with st.spinner('加载剧本...'):
-                script = sel_script
-                if script:
-                    st.session_state.game_script = script
-                    st.session_state.game_scene_idx = 0
-                    st.session_state.game_history = []
-                    st.session_state.game_ended = False
-                    # 清掉主页的 selected_book_id
-                    st.session_state.pop('selected_book_id', None)
+
+        # 顶部过滤栏
+        col_filter, col_history = st.columns([3, 1])
+        with col_filter:
+            cats = sorted({b.get('category', '其他') or '其他' for b in playable_books})
+            sel_cat = st.selectbox('📂 按分类筛选', ['全部'] + cats, key='filter_cat')
+            if sel_cat != '全部':
+                playable_books = [b for b in playable_books if (b.get('category') or '其他') == sel_cat]
+        with col_history:
+            st.markdown('##### 🕐 我的剧本杀历史')
+            try:
+                history = list_user_history(st.session_state.current_user['id'], limit=5)
+                if not history:
+                    st.caption('还没玩过')
                 else:
-                    st.error('该书没有剧本（先生成再玩）')
-                    st.session_state.game_book_id = None
-            st.rerun()
+                    for h in history:
+                        status_icon = {'playing': '▶️', 'completed': '✅', 'paused': '⏸️'}.get(h['status'], '•')
+                        st.caption(f"{status_icon} 《{h['book_name']}》 Lv.{h['current_scene_idx']+1} {h['total_score']:.0f}分")
+            except Exception as e:
+                st.caption(f'加载历史失败: {e}')
+
+        # 封面分类 emoji 映射
+        cat_emoji = {
+            '文学': '📖', '历史': '🏛️', '哲学': '🤔', '科学': '🔬',
+            '心理': '🧠', '写作': '✍️', '学习技巧': '💡', '艺术': '🎨',
+            '经济': '💰', '教育': '🎓', '其他': '📘', '综合套装': '📚',
+        }
+
+        # 平铺网格: 3 列 (封面 + 书名 + 分类)
+        n_cols = 3
+        for i in range(0, len(playable_books), n_cols):
+            cols = st.columns(n_cols)
+            for j, b in enumerate(playable_books[i:i+n_cols]):
+                with cols[j]:
+                    with st.container(border=True):
+                        # 封面 (优先本地文件, 缺失用 emoji 占位)
+                        cover_path = ROOT / 'data' / (b.get('cover_url') or '')
+                        cat = b.get('category') or '其他'
+                        if cover_path.exists():
+                            st.image(str(cover_path), use_container_width=True)
+                        else:
+                            st.markdown(f'<div style="text-align:center;font-size:5em">{cat_emoji.get(cat, "📘")}</div>', unsafe_allow_html=True)
+                        st.markdown(f"**{b.get('name', '?')}**")
+                        st.caption(f"分类: {cat}")
+                        if b.get('summary'):
+                            st.caption(b['summary'][:80] + ('...' if len(b.get('summary', '')) > 80 else ''))
+                        if st.button('🎮 查看剧本', key=f'select_book_{b["id"]}', use_container_width=True, type='primary'):
+                            st.session_state.selected_book_id = b['id']
+                            st.session_state.show_script_modal = True
+                            st.rerun()
+
+        # ========= 5. 弹层: 选剧本 + 选角色 + 开始 =========
+        if st.session_state.show_script_modal and st.session_state.selected_book_id:
+            sel_book = next((b for b in playable_books if b['id'] == st.session_state.selected_book_id), None)
+            if sel_book:
+                with st.container(border=True):
+                    st.markdown(f"## 📖 《{sel_book['name']}》")
+                    scripts_list = list_scripts(sel_book['id'])
+
+                    if not scripts_list:
+                        st.warning('这本书还没有生成剧本。')
+                    else:
+                        st.markdown('### 📜 这本书的剧本')
+                        # 进度提示: 是否玩过
+                        user_id = st.session_state.current_user['id']
+                        progress_map = {}
+                        for s in scripts_list:
+                            p = load_progress(user_id, sel_book['id'], s['id'])
+                            if p:
+                                progress_map[s['id']] = p
+                        # 平铺剧本按钮 (带进度提示)
+                        n_cols = min(3, len(scripts_list))
+                        cols = st.columns(n_cols)
+                        for i, s in enumerate(scripts_list):
+                            with cols[i % n_cols]:
+                                label = f"第 {s['chapter_index']+1} 册 · {s['n_scenes']} 场景"
+                                p = progress_map.get(s['id'])
+                                if p:
+                                    if p['status'] == 'completed':
+                                        label = f"✅ 第 {s['chapter_index']+1} 册 · 已完成"
+                                    else:
+                                        label = f"▶️ 第 {s['chapter_index']+1} 册 · Lv.{p['current_scene_idx']+1}/{s['n_scenes']}"
+                                btn_type = 'primary' if st.session_state.selected_script_id == s['id'] else 'secondary'
+                                if st.button(label, key=f'modal_ch_{s["id"]}', use_container_width=True, type=btn_type):
+                                    st.session_state.selected_script_id = s['id']
+                                    st.rerun()
+
+                        # 选完剧本 → 选角色
+                        if st.session_state.selected_script_id:
+                            target_script = next((s for s in scripts_list if s['id'] == st.session_state.selected_script_id), scripts_list[0])
+                            script_json = target_script['script_json']
+                            # 抽角色选项
+                            role_options = script_json.get('_player_role_options', [])
+                            if not role_options:
+                                seen = set()
+                                for sc in script_json.get('scenes', []):
+                                    for q in sc.get('questions', []):
+                                        rp = q.get('role_perspective', '').strip()
+                                        if rp:
+                                            seen.add(rp)
+                                role_options = sorted(seen) or ['读者']
+
+                            st.markdown('### 🎭 选你要扮演的角色')
+                            if 'player_role_radio' not in st.session_state or st.session_state.player_role_radio not in role_options:
+                                st.session_state.player_role_radio = role_options[0]
+                            chosen_role = st.session_state.player_role_radio
+                            cols = st.columns(min(4, len(role_options)))
+                            for k, role in enumerate(role_options):
+                                with cols[k % len(cols)]:
+                                    btn_type = 'primary' if role == chosen_role else 'secondary'
+                                    if st.button(role, key=f'modal_role_{role}', use_container_width=True, type=btn_type):
+                                        st.session_state.player_role_radio = role
+                                        st.rerun()
+
+                            # 确认开始
+                            p = progress_map.get(target_script['id'])
+                            resume_text = ''
+                            if p and p['status'] == 'playing':
+                                resume_text = f' (从 Lv.{p["current_scene_idx"]+1} 继续, 之前得分 {p["total_score"]:.0f})'
+                            elif p and p['status'] == 'completed':
+                                resume_text = ' (上次已完成, 将重新开始)'
+
+                            st.markdown('---')
+                            btn_label = f'🚀 确认开始剧本杀{resume_text}'
+                            if st.button(btn_label, key='start_play', type='primary', use_container_width=True):
+                                # 加载剧本
+                                st.session_state.game_book_id = sel_book['id']
+                                st.session_state.game_book_name = sel_book['name']
+                                st.session_state.game_script_id = target_script['id']
+                                st.session_state.player_role = chosen_role
+                                st.session_state.game_script = script_json
+                                # 如果有进度, 恢复
+                                if p and p['status'] == 'playing':
+                                    st.session_state.game_scene_idx = p['current_scene_idx']
+                                    st.session_state.game_history = p['game_history'] or []
+                                    st.info(f'✅ 恢复上次进度: Lv.{p["current_scene_idx"]+1}')
+                                else:
+                                    st.session_state.game_scene_idx = 0
+                                    st.session_state.game_history = []
+                                st.session_state.game_ended = False
+                                st.session_state.show_script_modal = False
+                                st.rerun()
+
+                    if st.button('✖ 关闭', key='close_modal'):
+                        st.session_state.show_script_modal = False
+                        st.session_state.selected_script_id = None
+                        st.rerun()
     else:
         # 显示当前书
         book_id = st.session_state.game_book_id
@@ -529,6 +657,22 @@ elif page == '🎮 剧本杀':
                 c1.metric('总分', f'{avg:.1f}/100')
                 c2.metric('回答数', n)
                 c3.metric('剧本', st.session_state.game_book_name)
+
+                # 保存完成记录 (主人 2026-08-22 钦定: 剧本使用记录模块)
+                try:
+                    save_progress(
+                        user_id=st.session_state.current_user['id'],
+                        book_id=st.session_state.game_book_id,
+                        script_id=st.session_state.game_script_id,
+                        player_role=st.session_state.player_role,
+                        scene_idx=idx,
+                        game_history=st.session_state.game_history,
+                        world_state={},
+                        total_score=avg,
+                        status='completed',
+                    )
+                except Exception as e:
+                    st.warning(f'保存进度失败: {e}')
                 st.balloons()
             else:
                 scene = scenes[idx]
@@ -711,6 +855,24 @@ elif page == '🎮 剧本杀':
                     st.session_state.scene_answers = []
                     if st.session_state.game_scene_idx >= len(scenes):
                         st.session_state.game_ended = True
+                    # 保存进度 (主人 2026-08-22 钦定: 剧本使用记录模块, 可中断恢复)
+                    try:
+                        cur_total = sum(h.get('score', 0) for h in st.session_state.game_history)
+                        cur_n = max(1, len(st.session_state.game_history))
+                        cur_avg = cur_total / cur_n
+                        save_progress(
+                            user_id=st.session_state.current_user['id'],
+                            book_id=st.session_state.game_book_id,
+                            script_id=st.session_state.game_script_id,
+                            player_role=st.session_state.player_role,
+                            scene_idx=st.session_state.game_scene_idx,
+                            game_history=st.session_state.game_history,
+                            world_state={},
+                            total_score=cur_avg,
+                            status='completed' if st.session_state.game_ended else 'playing',
+                        )
+                    except Exception:
+                        pass
                     st.rerun()
 
 
@@ -728,7 +890,7 @@ elif page == '🔍 搜索':
                 for r in results:
                     with st.container(border=True):
                         st.markdown(f"**{r.get('name', '?')}**")
-                        st.caption(f"分类: {r.get('category', '?')} · ID: {r.get('id', '?')}")
+                        st.caption(f"分类: {r.get('category', '?')}")
                         if r.get('summary'):
                             st.caption(r['summary'][:200])
             except Exception as e:
@@ -770,7 +932,7 @@ elif page == '📖 书详情':
 
     try:
         books = list_books(limit=200)
-        opts = {f"{b.get('name', '?')} (ID={b.get('id')})": b.get('id') for b in books if b.get('id')}
+        opts = {b.get('name', '?'): b.get('id') for b in books if b.get('id')}
         sel = st.selectbox('选书', list(opts.keys()))
         if sel:
             book_id = opts[sel]

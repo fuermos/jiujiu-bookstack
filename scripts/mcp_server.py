@@ -116,7 +116,7 @@ def tool_list_books(args, cur):
     category = args.get("category")
     limit = min(int(args.get("limit", 20)), 100)
     offset = int(args.get("offset", 0))
-    sql = """SELECT b.id, b.name, b.category, b.summary,
+    sql = """SELECT b.id, b.name, b.category, b.summary, b.cover_url,
         (gs.id IS NOT NULL) AS has_script,
         (bm.book_id IS NOT NULL) AS has_mindmap
         FROM books b

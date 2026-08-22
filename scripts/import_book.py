@@ -39,6 +39,7 @@ def import_epub(file_path: Path, force: bool = False) -> Optional[int]:
     """epub → chunks 入库，返回 book_id
 
     幂等: 已存在的书名不会重复 import
+    封面提取 (主人 2026-08-22 钓定: 剧本杀页平铺需展示封面)
     """
     book_name = file_path.stem.replace('_', ' ').strip()
     book_name = re.sub(r'\s*\(z-library.*?\)\s*', '', book_name, flags=re.IGNORECASE).strip()
@@ -59,6 +60,17 @@ def import_epub(file_path: Path, force: bool = False) -> Optional[int]:
         )
         book_id = cur.fetchone()['id']
         print(f'  📖 新书入库: id={book_id} name={book_name[:50]}')
+
+    # 提取封面图 (epub 第一张 img)
+    if file_path.suffix.lower() == '.epub':
+        try:
+            cover_rel = extract_cover(file_path, book_id)
+            if cover_rel:
+                with get_cursor() as cur:
+                    cur.execute('UPDATE books SET cover_url = %s WHERE id = %s', (cover_rel, book_id))
+                print(f'  🖼️  封面已提取: {cover_rel}')
+        except Exception as e:
+            print(f'  ⚠️  封面提取失败: {e}')
 
     # 解析 + chunks
     if file_path.suffix.lower() == '.epub':
@@ -129,3 +141,48 @@ def insert_chunks(book_id: int, chunks: list[dict]):
                    ON CONFLICT (book_id, md5(chunk_text)) DO NOTHING''',
                 (book_id, c['chapter_index'], c['chunk_text'], len(c['chunk_text'])),
             )
+
+
+def extract_cover(file_path: Path, book_id: int) -> Optional[str]:
+    """从 epub 提取封面图（第一张 img, 或 metadata 指定的 cover）
+
+    返回封面相对路径 (如 'covers/24.jpg'), 失败返回 None
+    """
+    COVERS_DIR = Path('data/covers')
+    COVERS_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        book = epub.read_epub(str(file_path))
+
+        # 1. 优先找 metadata 指定的 cover
+        cover_data = None
+        cover_ext = 'jpg'
+
+        # 遍历所有 items, 找带 cover 属性或 'cover' in id 的图
+        for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
+            item_id = (item.get_id() or '').lower()
+            if 'cover' in item_id or '封面' in item_id:
+                cover_data = item.get_content()
+                # 推断扩展名
+                mt = (item.media_type or 'image/jpeg').lower()
+                cover_ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif'}.get(mt, 'jpg')
+                break
+
+        # 2. 没找到: 取第一张图 (按文件顺序)
+        if not cover_data:
+            for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
+                cover_data = item.get_content()
+                mt = (item.media_type or 'image/jpeg').lower()
+                cover_ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif'}.get(mt, 'jpg')
+                break
+
+        if not cover_data:
+            return None
+
+        # 存盘
+        out_path = COVERS_DIR / f'{book_id}.{cover_ext}'
+        out_path.write_bytes(cover_data)
+        return f'covers/{book_id}.{cover_ext}'
+    except Exception as e:
+        print(f'  ⚠️  封面解析失败: {e}')
+        return None
