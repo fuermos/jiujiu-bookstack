@@ -121,7 +121,7 @@ def get_script(book_id: int) -> Optional[dict]:
 
 
 def list_scripts(book_id: int) -> list:
-    """列某本书所有剧本 (chapter_index + game_type + n_scenes)"""
+    """列某本书所有剧本 (id + chapter_index + game_type + n_scenes)"""
     mcp = get_mcp()
     result = mcp.call('get_script', {'book_id': book_id, 'game_type': 'v2_mixed'})
     scripts = mcp.parse(result)
@@ -129,6 +129,7 @@ def list_scripts(book_id: int) -> list:
     for s in (scripts or []):
         sj = s.get('script_json', {})
         out.append({
+            'id': s.get('id'),  # 透传 game_scripts.id 给上层 (进度恢复用)
             'chapter_index': s.get('chapter_index', 0),
             'game_type': s.get('game_type', ''),
             'n_scenes': len(sj.get('scenes', [])),

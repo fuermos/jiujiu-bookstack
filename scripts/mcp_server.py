@@ -189,10 +189,10 @@ def tool_get_script(args, cur):
     chapter = args.get("chapter")
     game_type = args.get("game_type", "v2_cyoa")
     if chapter is not None:
-        cur.execute("SELECT chapter_index, game_type, script_json FROM game_scripts WHERE book_id=%s AND chapter_index=%s AND game_type=%s",
+        cur.execute("SELECT id, chapter_index, game_type, script_json, total_scenes FROM game_scripts WHERE book_id=%s AND chapter_index=%s AND game_type=%s",
                     (book_id, int(chapter), game_type))
     else:
-        cur.execute("SELECT chapter_index, game_type, script_json FROM game_scripts WHERE book_id=%s AND game_type=%s ORDER BY chapter_index",
+        cur.execute("SELECT id, chapter_index, game_type, script_json, total_scenes FROM game_scripts WHERE book_id=%s AND game_type=%s ORDER BY chapter_index",
                     (book_id, game_type))
     return json.dumps([dict(r) for r in cur.fetchall()], ensure_ascii=False, indent=2, default=str)
 
