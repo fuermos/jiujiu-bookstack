@@ -68,6 +68,10 @@ def run_full_pipeline(book_id, config, llm, force=False, books_mode=False):
     from embed_chunks import embed_pending_chunks
     embed_pending_chunks(book_id, config['embedding'])
 
+    # Step 3: classify (主人 2026-08-22 发现: pipeline 缺分类步骤导致分类分布为 0)
+    from classify_book import classify_book
+    classify_book(book_id, force=force)
+
     # Step 3.5: mindmap
     from generate_mindmap import generate_mindmap
     generate_mindmap(book_id, llm, force=force)
