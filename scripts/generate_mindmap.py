@@ -50,12 +50,83 @@ mindmap
 ```'''
 
 
-def generate_mindmap(book_id: int, llm: LLMClient, force: bool = False, save_pg: bool = True) -> Optional[str]:
-    """生成思维导图，返回 mermaid 源码"""
-    # 检测已有
-    mm_path = MINDMAP_DIR / f'{book_id}.mmd'
+def mermaid_to_png(mermaid: str, output: Path, theme: str = 'default') -> bool:
+    """用 Playwright 渲染 mermaid 为 PNG (主人 2026-08-22 要求"思维导图需要是图的形式")
+
+    方案: 内嵌 mermaid.ink 在线渲染 (最快免依赖) → Playwright Chromium 截图 → 保存 PNG
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print('  ⚠️  playwright 未装, 跳过 PNG 渲染')
+        return False
+
+    # 写临时 HTML
+    html = f'''<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+body{{margin:0;padding:20px;background:white;}}
+.mermaid{{font-family:"Microsoft YaHei",sans-serif;}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="mermaid">
+{mermaid}
+</div>
+<script>
+mermaid.initialize({{startOnLoad:true, theme:'{theme}', themeVariables:{{fontSize:'16px'}}}});
+</script>
+</body></html>'''
+    tmp_html = Path('/tmp/mermaid_render.html')
+    tmp_html.write_text(html, encoding='utf-8')
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={'width': 1400, 'height': 1000})
+            page.goto(f'file://{tmp_html}', wait_until='networkidle', timeout=30000)
+            # 等 mermaid 渲染完
+            page.wait_for_timeout(3000)
+            # 截图 mermaid 节点
+            elem = page.query_selector('.mermaid svg')
+            if elem:
+                elem.screenshot(path=str(output))
+                browser.close()
+                print(f'  ✅ PNG: {output} ({output.stat().st_size//1024} KB)')
+                return True
+            else:
+                # fallback: 截整个 body
+                page.screenshot(path=str(output), full_page=True)
+                browser.close()
+                print(f'  ⚠️  fallback 到 full_page 截图')
+                return True
+    except Exception as e:
+        print(f'  ❌ PNG 渲染失败: {e}')
+        return False
+
+
+def generate_mindmap(book_id: int, llm: LLMClient, force: bool = False, save_pg: bool = True,
+                     script_id: Optional[int] = None) -> Optional[str]:
+    """生成思维导图，返回 mermaid 源码 (同步生成 PNG)
+
+    主人 2026-08-22 钓定: 每本书多个剧本, 每个剧本独立思维导图
+    - script_id=None: 按书生成汇总 mindmap (兼容老路径)
+    - script_id=N: 读 game_scripts[id=N] 的 scenes 生成剧本级 mindmap
+
+    输出: mindmaps/{book_id}.mmd (书级) / mindmaps/{book_id}_{script_id}.mmd (剧本级)
+    """
+    # 选路路径 (剧本级优先)
+    if script_id:
+        key = f'{book_id}_{script_id}'
+    else:
+        key = f'{book_id}'
+
+    mm_path = MINDMAP_DIR / f'{key}.mmd'
+    png_path = MINDMAP_DIR / f'{key}.png'
     if mm_path.exists() and not force:
         print(f'  ⏭️  mindmap {mm_path} 已存在')
+        if not png_path.exists():
+            mermaid_to_png(mm_path.read_text(encoding='utf-8'), png_path)
         return mm_path.read_text(encoding='utf-8')
 
     # 加载 chunks
@@ -68,6 +139,12 @@ def generate_mindmap(book_id: int, llm: LLMClient, force: bool = False, save_pg:
     user_prompt = f'书籍内容:\n{full_text[:60000]}\n\n请生成 mermaid 思维导图源码。'
 
     print(f'  🧠 book={book_id} 生成 mindmap ...')
+    if script_id:
+        script_prompt = generate_script_mindmap_prompt(book_id, script_id)
+        if not script_prompt:
+            return None
+        user_prompt = script_prompt
+        print(f'    ↳ 剧本级 mindmap (script_id={script_id})')
     text, provider = llm.call(SYSTEM, user_prompt, max_tokens=4000)
 
     # 提取 mermaid 代码块
@@ -78,16 +155,76 @@ def generate_mindmap(book_id: int, llm: LLMClient, force: bool = False, save_pg:
 
     # 同步写 .json（结构化版本）
     structure = mermaid_to_structure(mermaid)
-    (MINDMAP_DIR / f'{book_id}.json').write_text(
+    (MINDMAP_DIR / f'{key}.json').write_text(
         json.dumps(structure, ensure_ascii=False, indent=2),
         encoding='utf-8'
     )
 
     if save_pg:
-        save_to_pg(book_id, mermaid, structure, provider)
+        save_to_pg(book_id, mermaid, structure, provider, script_id=script_id)
+
+    # 同步生成 PNG (主人 2026-08-22 要求: mindmap 必须是图)
+    mermaid_to_png(mermaid, png_path)
 
     print(f'  ✅ mindmap: {mm_path} ({len(mermaid)} chars)')
     return mermaid
+
+
+def generate_script_mindmap_prompt(book_id: int, script_id: int) -> Optional[str]:
+    """从 game_scripts 里读剧本结构, 生成提示词 (剧本级 mindmap)"""
+    from db import get_cursor
+    with get_cursor(dict_cursor=True) as cur:
+        cur.execute(
+            'SELECT book_id, script_json, total_scenes FROM game_scripts WHERE id = %s AND book_id = %s',
+            (script_id, book_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        print(f'    ❌ script_id={script_id} not found')
+        return None
+
+    script = row['script_json']
+    scenes = script.get('scenes', [])
+    scene_summaries = []
+    for i, s in enumerate(scenes, 1):
+        title = s.get('title', f'场景{i}')
+        desc = s.get('description', '')[:80]
+        player = s.get('player_role', '?')
+        scene_summaries.append(f'场景{i} {title} ({player}): {desc}...')
+
+    book_name = get_book_name(book_id)
+    return f'''剧本: {book_name}
+本剧本共 {len(scenes)} 个场景, 玩家角色与剧情进展如下:
+
+{chr(10).join(scene_summaries)}
+
+请生成 mermaid mindmap, 结构:
+- 根: 剧本名
+- 二级: 场景列表 (起承转合 4 个阶段, 每阶段包含几个 scene)
+- 二级: 玩家角色轨迹 (身份/状态/代入点)
+- 二级: 核心诡计 / 反转
+- 二级: 主题/价值观
+- 二级: 金句/名场面
+
+不要有错别字, 中文输出, mermaid 格式从 mindmap 开头.'''
+
+
+def generate_all_script_mindmaps(book_id: int, llm: LLMClient, force: bool = False) -> list:
+    """为某本书的所有剧本生成 mindmap (主人 2026-08-22 要求: 每剧本一图)"""
+    from db import get_cursor
+    with get_cursor(dict_cursor=True) as cur:
+        cur.execute(
+            'SELECT id FROM game_scripts WHERE book_id = %s ORDER BY chapter_index, id',
+            (book_id,),
+        )
+        script_ids = [r['id'] for r in cur.fetchall()]
+
+    print(f'  📜 book={book_id} 有 {len(script_ids)} 个剧本')
+    results = []
+    for sid in script_ids:
+        mm = generate_mindmap(book_id, llm, force=force, script_id=sid)
+        results.append({'script_id': sid, 'mindmap': mm})
+    return results
 
 
 def load_chunks_text(book_id: int, max_chars: int = 200000) -> str:
@@ -172,16 +309,24 @@ def mermaid_to_structure(mermaid: str) -> dict:
     return structure
 
 
-def save_to_pg(book_id: int, mermaid: str, structure: dict, provider: str):
-    """写 PG book_mindmaps 表"""
+def save_to_pg(book_id: int, mermaid: str, structure: dict, provider: str,
+              script_id: Optional[int] = None, png_path: Optional[str] = None):
+    """写 PG book_mindmaps 表
+
+    主键: (book_id, script_id) 联合
+    script_id=None -> 0 (书级汇总 mindmap)
+    script_id=N    -> N (第 N 个剧本的 mindmap)
+    """
+    sid = script_id if script_id is not None else 0
     with get_cursor() as cur:
         cur.execute(
-            '''INSERT INTO book_mindmaps (book_id, mermaid, structure, llm_model)
-               VALUES (%s, %s, %s, %s)
-               ON CONFLICT (book_id) DO UPDATE SET
+            '''INSERT INTO book_mindmaps (book_id, script_id, mermaid, structure, llm_model, png_path)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON CONFLICT (book_id, script_id) DO UPDATE SET
                    mermaid = EXCLUDED.mermaid,
                    structure = EXCLUDED.structure,
                    llm_model = EXCLUDED.llm_model,
+                   png_path = EXCLUDED.png_path,
                    updated_at = NOW()''',
-            (book_id, mermaid, json.dumps(structure, ensure_ascii=False), provider),
+            (book_id, sid, mermaid, json.dumps(structure, ensure_ascii=False), provider, png_path),
         )

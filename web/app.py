@@ -416,18 +416,41 @@ elif page == '🎮 剧本杀':
             if b.get('id') == sel_id:
                 default_idx = i
                 break
-        sel_label = st.selectbox('选书', list(book_options.keys()), index=default_idx)
-        sel_book = book_options[sel_label]
+        # 平铺选书: 毎个书一个 button (主人 2026-08-22 钓定: 不要用 selectbox, 平铺)
+        st.markdown('### 📚 选书')
+        book_names = list(book_options.keys())
+        n_cols = min(4, len(book_names))
+        cols = st.columns(n_cols)
+        for i, (label, b) in enumerate(book_options.items()):
+            with cols[i % n_cols]:
+                btn_type = 'primary' if i == default_idx else 'secondary'
+                if st.button(label, key=f'book_{b["id"]}', use_container_width=True, type=btn_type):
+                    st.session_state.selected_book_id = b['id']
+                    st.rerun()
+        sel_book = book_options[book_names[default_idx]]
+        if st.session_state.get('selected_book_id') and st.session_state.selected_book_id != sel_book['id']:
+            sel_book = next((b for b in playable_books if b['id'] == st.session_state.selected_book_id), sel_book)
         # 取这本书所有剧本 (一本书可能多 chapter, 比如福尔摩斯全集每册一个)
         scripts_list = list_scripts(sel_book['id'])
         if not scripts_list:
             st.warning('这本书还没有生成剧本。')
             st.stop()
-        # 多剧本时, 让玩家选 chapter
+        # 多剧本时, 平铺按钮选 chapter
         if len(scripts_list) > 1:
-            chapter_labels = [f"第 {s['chapter_index']+1} 册 ({s['n_scenes']} 场景)" for s in scripts_list]
-            ch_idx = st.selectbox('📖 选要玩的章节', range(len(chapter_labels)), format_func=lambda i: chapter_labels[i])
-            sel_script = scripts_list[ch_idx]['script_json']
+            st.markdown('### 📖 选剧本 (每本书多剧本)')
+            n_cols = min(3, len(scripts_list))
+            cols = st.columns(n_cols)
+            sel_script = None
+            for i, s in enumerate(scripts_list):
+                with cols[i % n_cols]:
+                    label = f"第 {s['chapter_index']+1} 册\n{s['n_scenes']} 场景"
+                    if st.button(label, key=f'ch_{s["id"]}', use_container_width=True):
+                        st.session_state.selected_script_id = s['id']
+                        st.rerun()
+            # 默认选上次选的或第一个
+            sel_sid = st.session_state.get('selected_script_id')
+            target = next((s for s in scripts_list if s['id'] == sel_sid), scripts_list[0])
+            sel_script = target['script_json']
         else:
             sel_script = scripts_list[0]['script_json']
         # 选角色 - 从 sel_script._player_role_options 或 抽 role_perspective
@@ -441,7 +464,23 @@ elif page == '🎮 剧本杀':
                     if rp:
                         seen.add(rp)
             role_options = sorted(seen) or ['华生', '福尔摩斯', '读者 (上帝视角)']
-        chosen_role = st.selectbox('🎭 选你要扮演的角色', role_options, help='不同角色看到不同剧情角度')
+        # 平铺选角色 (主人 2026-08-22 钓定: 不要 selectbox, 平铺下拉方便选择)
+        st.markdown('### 🎭 选你要扮演的角色')
+        # 上次选的角色
+        prev_role = st.session_state.get('player_role', role_options[0])
+        # 默认选默认第一个
+        if 'player_role_radio' not in st.session_state or st.session_state.player_role_radio not in role_options:
+            st.session_state.player_role_radio = prev_role if prev_role in role_options else role_options[0]
+        chosen_role = st.session_state.player_role_radio
+        n_cols = min(4, len(role_options))
+        cols = st.columns(n_cols)
+        for i, role in enumerate(role_options):
+            with cols[i % n_cols]:
+                btn_type = 'primary' if role == chosen_role else 'secondary'
+                if st.button(role, key=f'role_{i}_{role}', use_container_width=True, type=btn_type):
+                    st.session_state.player_role_radio = role
+                    chosen_role = role
+                    st.rerun()
         if st.button('🚀 开始玩'):
             st.session_state.game_book_id = sel_book['id']
             st.session_state.game_book_name = sel_book['name']
@@ -747,10 +786,16 @@ elif page == '📖 书详情':
             st.subheader('📝 叙事摘要')
             st.markdown(book.get('summary', '（无摘要）'))
 
-            # 思维导图（如有）
+            # 思维导图（如有）—— 优先显示 PNG 图, 源码折叠备用
+            png_path = ROOT / 'mindmaps' / f"{book.get('id')}.png"
             mmd_path = ROOT / 'mindmaps' / f"{book.get('id')}.mmd"
-            if mmd_path.exists():
-                with st.expander('🗺️ 思维导图 (Mermaid)'):
+            if png_path.exists():
+                st.subheader('🗺️ 思维导图')
+                st.image(str(png_path), use_container_width=True)
+                with st.expander('🔧 Mermaid 源码'):
+                    st.code(mmd_path.read_text(encoding='utf-8'), language='mermaid')
+            elif mmd_path.exists():
+                with st.expander('🗺️ 思维导图 (Mermaid 源码)'):
                     st.code(mmd_path.read_text(encoding='utf-8'), language='mermaid')
 
             # SKILL.md（如有）

@@ -12,16 +12,12 @@ llm:
   fallback:
     # ornith 是 MTP (multi-token prediction) reasoning 类, thinking 已关
     # 注意: max_tokens 必须 >= 1500, 否则只输出思考不输出答案
+    # 主人钦定 (2026-08-22): 只用一个模型, 不要多 fallback 浪费
     - name: lmstudio-ornith
       provider: openai
       base_url: http://192.168.0.14:2345/v1
       api_key: lm-studio
       model: ornith-1.0-9b-mtp
-    - name: lmstudio-qwen
-      provider: openai
-      base_url: http://192.168.0.14:2345/v1
-      api_key: lm-studio
-      model: qwen/qwen3.8-27b
 
 embedding:
   base_url: http://192.168.0.14:2345/v1
