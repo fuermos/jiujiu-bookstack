@@ -148,7 +148,9 @@ def extract_cover(file_path: Path, book_id: int) -> Optional[str]:
 
     返回封面相对路径 (如 'covers/24.jpg'), 失败返回 None
     """
-    COVERS_DIR = Path('data/covers')
+    # 用 __file__ 反推项目根，避免 CWD 错乱（主人口令 2026-08-24）
+    # 之前 Path('data/covers') 相对 CWD，从 scripts/ 跑会歪到 scripts/data/covers/
+    COVERS_DIR = Path(__file__).parent.parent / 'data' / 'covers'
     COVERS_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
