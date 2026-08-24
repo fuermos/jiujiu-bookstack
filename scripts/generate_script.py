@@ -7,9 +7,16 @@
 import json
 from pathlib import Path
 from typing import Optional
+from datetime import datetime
 
 from db import get_cursor
 from llm_client import LLMClient
+
+
+def log(msg, level='INFO'):
+    """简单日志（2026-08-24 补）— 补全 enrich 脚本里需要的 log() 调用"""
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f'[{ts}] [{level}] {msg}', flush=True)
 
 TTS_DIR = Path('tts')
 
@@ -18,15 +25,24 @@ SYSTEM = '''你是顶级沉浸式剧本杀设计师。生成多题型 v2.3 第�
 
 【硬约束 - 必须严格遵守】
 1. description 第一人称，必须以"你"开头，含感官细节（看/听/嗅/触/味至少 3 种）
-2. 每个场景含 player_role 字段（默认"华生医生"）
-3. 每个场景含 world_state 字段（4 键值对：华生状态/案件进度/危险等级/道德记录）
+2. 每个场景含 player_role 字段（**必须严格使用 characters.available_roles 里的 role_id，禁止自创人物名**）
+3. 每个场景含 world_state 字段（4 键值对，用本书语境的术语，不要套用任何特定书的固定名）
 4. choice 题必含 consequences 字段（4 字符串数组，每个 30-50 字剧情后果）
 5. options 字段不加"A. "前缀（UI 自动加）
+
+【v3.0 角色系统 — 严禁违反】（2026-08-24 主人反馈 bug fix）
+- 🚨 **严禁** 在任何字段使用其他书的 IP 角色（华生/福尔摩斯/莫斯坦/斯莫尔/巴塞洛缪/哈利/赫敏/柯南/毛利/江户川 等）
+- 🚨 **严禁** 硬编码"默认主角=华生医生/福尔摩斯" 等 — 主角名必须是 characters.available_roles 里的 role_id
+- characters.available_roles 必须填满 3 个角色：角色1 是"现代读者·笑笑"固定 + 角色2/3 从本书人物/视角推导
+- 每个 question 的 role_perspective 必须是 characters.available_roles 里的某个 role_id
+- 每个 scene 的 player_role 必须是 characters.available_roles 里的某个 role_id
+- scene.description 里"你是 XXX" 的 XXX 必须是 characters.available_roles 里的 role_name
 
 【剧情设计原则】
 - 玩家是亲历者不是旁观者，描述要像电影开场
 - choice 选项是剧情动作（勇敢/谨慎/求助/后退），每个有不同剧情后果
 - 起承转合完整分布，13-15 个场景
+- 角色命名必须严格基于本书的人物和语境，不能套任何外部 IP
 
 【题型配比】32 题左右
 - choice 40% / comprehension_mc 25% / open_ended 25% / inference_mc 10%
@@ -46,6 +62,18 @@ def generate_script_and_tts(book_id: int, llm: LLMClient, force: bool = False,
 
     book_name = get_book_name(book_id)
     full_text = load_chunks_text(book_id)
+
+    # ★ v3.0 (2026-08-24): 加载 book_meta (name + category) 给 enrich 用，避免跨书 IP 污染
+    from db import get_cursor
+    book_meta = {'name': book_name, 'category':''}
+    try:
+        with get_cursor() as cur:
+            cur.execute('SELECT category FROM books WHERE id = %s', (book_id,))
+            row = cur.fetchone()
+            if row:
+                book_meta['category'] = row['category'] or ''
+    except Exception as e:
+        print(f'  ⚠️ book_meta 加载失败: {e}')
 
     # 注入 skill + mindmap
     skill_ref = ''
@@ -138,7 +166,7 @@ def generate_script_and_tts(book_id: int, llm: LLMClient, force: bool = False,
         return None
 
     # 后处理：补齐第一人称/player_role/world_state/consequences
-    script_json = enrich_script_for_immersive(script_json)
+    script_json = enrich_script_for_immersive(script_json, book_meta=book_meta)
 
     # 写 PG
     script_id = save_to_pg(book_id, script_json, provider)
@@ -184,57 +212,106 @@ def get_existing_script(book_id: int) -> Optional[int]:
         return row['id'] if row else None
 
 
-def enrich_script_for_immersive(script_json: dict) -> dict:
-    """后处理：把 LLM 没听话生成的字段补齐
+# ★ v3.0 (2026-08-24 主人反馈 bug fix):
+# jiujiu-bookstack 之前硬编码福尔摩斯人物 (华生/福尔摩斯/斯莫尔/莫斯坦/巴塞洛缪)，
+# 导致所有书的 player_role 都被污染。改为从 book_meta + characters.available_roles 推导。
+FOREIGN_CHARS = {'华生', '福尔摩斯', '莫斯坦', '巴塞洛缪', '斯莫尔', '华生医生',
+                 '哈利', '赫敏', '罗恩', '霍格沃茨', '邓布利多', '江户川', '柯南', '毛利',
+                 '工藤新一'}
 
-    LLM 经常偷懒不写第一人称 / player_role / world_state / consequences，
-    我们兜底填上，保证 web 端有剧情化体验。
+
+def _derive_roles_from_book(book_meta: dict) -> list[str]:
+    """根据书名/分类推导专属 3 角色 ID（v3.0 fallback）"""
+    if not book_meta:
+        return ['主角', 'NPC', '读者']
+    name = book_meta.get('name') or ''
+    category = book_meta.get('category') or ''
+
+    # 福尔摩斯 → Holmes characters 是合法的
+    if '福尔摩斯' in name or 'holmes' in name.lower():
+        return ['华生', '福尔摩斯', '莫斯坦']
+    # 哈利波特
+    if '哈利' in name or 'harry' in name.lower():
+        return ['哈利', '赫敏', '罗恩']
+    # 柯南
+    if '柯南' in name or 'detective conan' in name.lower():
+        return ['柯南', '毛利', '灰原']
+    # 数学 / 概率 / 统计
+    if any(kw in name for kw in ['数学', '概率', '统计', '算法']):
+        return ['思考者', '探索者', '解谜人']
+    # 心理学 / 成长
+    if '心理' in category or '成长' in category:
+        return ['探索者', '倾听者', '思考者']
+    # 历史
+    if '历史' in category:
+        return ['小史官', '见证者', '记录者']
+    # 文学 / 散文
+    if '文学' in category or '散文' in category:
+        return ['读书人', '小书童', '汪老']
+    # 默认安全标签
+    return ['主角', 'NPC', '读者']
+
+
+def enrich_script_for_immersive(script_json: dict, book_meta: dict = None) -> dict:
+    """后处理 + v3.0 角色适配（2026-08-24 主人反馈 bug fix）
+
+    原版硬编码华生/福尔摩斯等跨书角色，导致非福尔摩斯书也被污染。
+    现在改为：① LLM 写的 characters.available_roles 为权威
+             ② 缺失时从 book_meta 推导
+             ③ 兜底用安全标签
     """
     scenes = script_json.get('scenes', [])
+
+    # ★ v3.0: 优先读 LLM 写的 characters.available_roles
+    characters = script_json.get('characters', {})
+    available_roles = characters.get('available_roles', []) if isinstance(characters, dict) else []
+    available_role_ids = [r.get('role_id', '').strip() for r in available_roles if r.get('role_id', '').strip()]
+    # 过滤掉 LLM 写的跨书 IP 角色（如华生出现在数学书里）
+    available_role_ids = [r for r in available_role_ids if r not in FOREIGN_CHARS]
+
+    # 如果 LLM 没填或全被过滤，从 book_meta 推导
+    if not available_role_ids:
+        available_role_ids = _derive_roles_from_book(book_meta)
+        log(f'🎭 v3.0 LLM 未填 characters.available_roles，按书名[{book_meta.get("name") if book_meta else "?"}] 推导: {available_role_ids}')
+
+    primary_role = available_role_ids[0]
+
     for i, s in enumerate(scenes):
-        # 1. description 转第一人称：如果不以"你"开头，加"你"
+        # 1. description 转第一人称
         desc = s.get('description', '').strip()
         if desc and not desc.startswith(('你', '你')):
-            # 加第一句"你..."做代入
             s['description'] = '你' + desc[0] + '。' + desc[1:] if desc[0] not in '。，！？、' else '你' + desc
-        elif desc and desc.startswith('你'):
-            pass  # 已经是第一人称
-        # 2. player_role
-        if not s.get('player_role'):
-            s['player_role'] = '华生医生' if i < len(scenes) * 0.7 else '福尔摩斯'
-        # 3. world_state
+        # 2. player_role (v3.0: 不再硬编码 Holmes)
+        pr = str(s.get('player_role') or '').strip()
+        if not pr or pr in FOREIGN_CHARS:
+            s['player_role'] = primary_role
+        # 3. world_state (v3.0: 不再硬编码"华生状态")
         if not s.get('world_state') or s.get('world_state') == {}:
             act = s.get('act', '')
             danger = {'起': '🟢', '承': '🟡', '转': '🔴', '合': '⚪'}.get(act, '🟢')
+            # 找 available_roles[0] 对应的 role_name 作状态标签
+            role_label = primary_role
             s['world_state'] = {
-                '华生状态': '警觉',
-                '案件进度': f'线索 {min(i+1, 12)}/12',
+                f'{role_label}状态': '专注',
+                '进度': f'线索 {min(i+1, 12)}/12',
                 '危险等级': danger,
                 '道德记录': [],
             }
-        # 2.5 按 act 自动分配角色视角 (替代 LLM 只写华生)
-        # 起: 华生; 承: 莫斯坦小姐; 转: 福尔摩斯/斯莫尔; 合: 任意
-        act_role_map = {
-            '起': ['华生', '莫斯坦小姐'],
-            '承': ['莫斯坦小姐', '华生', '福尔摩斯'],
-            '转': ['福尔摩斯', '斯莫尔', '华生', '巴塞洛缪'],
-            '合': ['华生', '福尔摩斯', '莫斯坦小姐'],
-        }
-        for s in scenes:
-            act = s.get('act', '起')
-            roles_for_act = act_role_map.get(act, ['华生'])
-            for qi, q in enumerate(s.get('questions', [])):
-                if q.get('type') in ('comprehension_mc', 'open_ended', 'inference_mc'):
-                    # 每题分配不同角色 (循环使用)
-                    q['role_perspective'] = roles_for_act[qi % len(roles_for_act)]
-        # 抽出所有可用 NPC 给 web UI (玩家可自选)
-        npcs = set()
-        for s in scenes:
-            act = s.get('act', '起')
-            npcs.update(act_role_map.get(act, ['华生']))
-        script_json['_available_npcs'] = sorted(npcs)
-        script_json['_player_role_options'] = sorted(npcs) + ['读者 (上帝视角)']
-        # 4. choice 题 consequences 兜底
+    # 2.5 按 act 自动分配角色视角 (v3.0: 用 available_role_ids 循环，不用 Holmes)
+    for s in scenes:
+        for qi, q in enumerate(s.get('questions', [])):
+            if q.get('type') in ('comprehension_mc', 'open_ended', 'inference_mc'):
+                rp = str(q.get('role_perspective') or '').strip()
+                # 替换跨书 IP 角色
+                if rp in FOREIGN_CHARS or not rp:
+                    q['role_perspective'] = available_role_ids[qi % len(available_role_ids)]
+
+    # 抽出所有可用 NPC (v3.0: 从 available_role_ids 来，不再是 Holmes)
+    script_json['_available_npcs'] = list(available_role_ids)
+    script_json['_player_role_options'] = list(available_role_ids) + ['读者 (上帝视角)']
+
+    # 4. choice 题 consequences 兜底
+    for s in scenes:
         for q in s.get('questions', []):
             if q.get('type') == 'choice':
                 cons = q.get('consequences')
@@ -243,21 +320,18 @@ def enrich_script_for_immersive(script_json: dict) -> dict:
                     cons_list = []
                     for o in opts[:4]:
                         o_clean = str(o).strip()
-                        # 去掉前缀 A. B. C. D.
                         if o_clean[:2] in ('A.', 'B.', 'C.', 'D.') and o_clean[1:3].strip() == '.':
                             o_clean = o_clean[3:].strip()
                         cons_list.append(f"你选择了【{o_clean}】，剧情继续推进...")
                     q['consequences'] = cons_list
                 elif isinstance(cons, str):
                     q['consequences'] = [cons] + [f"你选择了另一个选项，剧情继续推进..."] * 3
-                # 5. options 去掉 "A. " 前缀（防重复）
                 opts = q.get('options', [])
                 q['options'] = [
                     (o[3:].strip() if o[:2] in ('A.', 'B.', 'C.', 'D.', 'E.') and o[1:3].strip() == '.' else o)
                     for o in opts
                 ]
             elif q.get('type') in ('comprehension_mc', 'inference_mc'):
-                # 同样去掉 options 前缀
                 opts = q.get('options', [])
                 q['options'] = [
                     (o[3:].strip() if o[:2] in ('A.', 'B.', 'C.', 'D.', 'E.') and o[1:3].strip() == '.' else o)
