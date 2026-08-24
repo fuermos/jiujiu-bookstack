@@ -10,14 +10,14 @@ llm:
     api_key: ${MINIMAX_API_KEY}    # 从 docker-compose env 注入
     model: MiniMax-M3
   fallback:
-    # ornith 是 MTP (multi-token prediction) reasoning 类, thinking 已关
-    # 注意: max_tokens 必须 >= 1500, 否则只输出思考不输出答案
-    # 主人钦定 (2026-08-22): 只用一个模型, 不要多 fallback 浪费
-    - name: lmstudio-ornith
+    # 主人钦定 (2026-08-23): 玩剧本杀时本地唯一 fallback = unsloth/qwen3.8-27b
+    # 优势: 场景/OE评分/NPC对话 普遍快 20%+ (32-46 tok/s vs ornith 32 tok/s)
+    # ⚠️ 必须去 LM Studio 把 thinking 关干净 + reload, 否则 ```json 包装泄漏
+    - name: lmstudio-unsloth
       provider: openai
       base_url: http://192.168.0.14:2345/v1
       api_key: lm-studio
-      model: ornith-1.0-9b-mtp
+      model: unsloth/qwen3.8-27b
 
 embedding:
   base_url: http://192.168.0.14:2345/v1
