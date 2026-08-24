@@ -33,6 +33,7 @@ from mcp.client.stdio import stdio_client
 from user_manager import (
     register_user, login_user, get_user,
     save_progress, load_progress, list_user_history, delete_progress,
+    issue_token, resolve_token, revoke_token,  # 2026-08-24 主人反馈加: 登录持久化
 )
 
 # 初始化 DB 连接池 (user_manager 直连 DB)
@@ -322,11 +323,23 @@ with st.sidebar:
     # 用户登录状态
     if 'current_user' not in st.session_state:
         st.session_state.current_user = None
+    # 2026-08-24 加: 启动时尝试从 query_params 里的 token 还原登录态 (防止刷新掉登)
+    if st.session_state.current_user is None:
+        url_token = st.query_params.get('token', '')
+        if url_token:
+            user_obj = resolve_token(url_token)
+            if user_obj:
+                st.session_state.current_user = user_obj
     user = st.session_state.get('current_user')
     if user:
         st.markdown(f"### 👤 {user['nickname']}")
         st.caption(f"📧 {user['email']}")
         if st.button('🚪 退出登录', use_container_width=True):
+            # 2026-08-24 加: 退出时清除 token + query_params,防下个访客自动登入
+            old_token = st.query_params.get('token', '')
+            if old_token:
+                revoke_token(old_token)
+            st.query_params.clear()
             st.session_state.current_user = None
             st.session_state.game_book_id = None
             st.rerun()
@@ -364,6 +377,9 @@ def render_auth_form():
                     if 'error' in res:
                         st.error(res['error'])
                     else:
+                        # 2026-08-24 主人反馈: 刷页面需要重登 -> token + query_params 持久化
+                        token = issue_token(res['id'])
+                        st.query_params['token'] = token
                         st.session_state.current_user = res
                         st.success(f'✅ 欢迎回来 {res["nickname"]}!')
                         st.rerun()
@@ -384,6 +400,9 @@ def render_auth_form():
                     if 'error' in res:
                         st.error(res['error'])
                     else:
+                        # 2026-08-24 主人反馈: 注册成功同样发 token,避免跳出后丢登录
+                        token = issue_token(res['id'])
+                        st.query_params['token'] = token
                         st.session_state.current_user = res
                         st.success(f'✅ 注册成功, 欢迎 {res["nickname"]}!')
                         st.rerun()
@@ -391,13 +410,17 @@ def render_auth_form():
 
 # ============== Modal: 选剧本 & 选角色 (Streamlit 1.31+ @st.dialog) ==============
 
-@st.dialog('🎭 选剧本 → 选角色', width='large')
+@st.dialog('🎭 三步：选剧本 → 选角色 → 进故事', width='large')
 def _script_selector_modal(book_id: int):
-    """分步流：选剧本 → 选角色 → 开始游戏
+    """分步流（v3 2026-08-24 主人反馈）：
 
-    历史教训 (2026-08-24 主人反馈 bug fix): 旧版 SUSPICIOUS_CHARS 硬编码误判
-    （福尔摩斯本尊的书也被标"跨书串场"）。新版基于 scenes 实际角色校验：
-    _player_role_options 里的角色必须在 scenes 也出现才算合法。
+    ① 选剧本 → ② 选角色 → ③ 确认开玩
+    每步未完成时，后面的内容不出现。
+
+    历史教训:
+    - 旧版 SUSPICIOUS_CHARS 硬编码误判（福尔摩斯本尊的书也被标"跨书串场"）
+    - 旧版剧本+角色一锅端，主人反馈应严格三段式
+    - 旧版直接显示英文 role_id（reader_xiao 等）→ 改成优先中文 role_name
     """
     sel_book = get_book(book_id)
     if not sel_book:
@@ -429,82 +452,143 @@ def _script_selector_modal(book_id: int):
         if p:
             progress_map[s['id']] = p
 
-    st.markdown('#### 📜 选个剧本')
-    n_cols = min(3, len(scripts_list))
-    cols = st.columns(n_cols)
-    for i, s in enumerate(scripts_list):
-        with cols[i % n_cols]:
-            label = f"第 {s['chapter_index']+1} 册 · {s['n_scenes']} 场景"
-            p = progress_map.get(s['id'])
-            if p:
-                if p['status'] == 'completed':
-                    label = f"✅ 第 {s['chapter_index']+1} 册 · 已通关"
-                else:
-                    label = f"▶️ 第 {s['chapter_index']+1} 册 · Lv.{p['current_scene_idx']+1}/{s['n_scenes']}"
-            btn_type = 'primary' if st.session_state.selected_script_id == s['id'] else 'secondary'
-            if st.button(label, key=f'dlg_ch_{s["id"]}', use_container_width=True, type=btn_type):
-                st.session_state.selected_script_id = s['id']
-                st.rerun()
-
-    # 选完剧本 → 选角色
-    if st.session_state.selected_script_id:
-        target_script = next((s for s in scripts_list if s['id'] == st.session_state.selected_script_id), scripts_list[0])
-        script_json = target_script['script_json']
-        role_options = script_json.get('_player_role_options', [])
-
-        # ★ B 防御 v2 (2026-08-24 主人反馈 bug fix):
-        # 旧版用硬编码 SUSPICIOUS_CHARS 误判（福尔摩斯本尊也被标污染）
-        # 新版基于 scenes 实际角色校验：_player_role_options 里出现的角色
-        # 必须在 scenes（scene.player_role 或 question.role_perspective）也出现才算合法
-        scenes_roles: set = set()
-        for sc in script_json.get('scenes', []):
-            pr = (sc.get('player_role') or '').strip()
-            if pr:
-                scenes_roles.add(pr)
-            for q in sc.get('questions', []):
-                rp = (q.get('role_perspective') or '').strip()
-                if rp:
-                    scenes_roles.add(rp)
-
-        foreign_roles = [r for r in role_options if r not in scenes_roles]
-        valid_roles = [r for r in role_options if r in scenes_roles]
-        if foreign_roles:
-            st.warning(f'⚠️ _player_role_options 含 scenes 中未出现的角色 {foreign_roles}，已自动剔除并以 scenes 角色为准。')
-        if valid_roles:
-            role_options = valid_roles
-        elif scenes_roles:
-            role_options = sorted(scenes_roles)
-        else:
-            role_options = ['主角', '书童', '旁白']
-
-        st.markdown('#### 🎭 在这个故事里，你是谁？')
-        # 如果 radio 与当前书的可选角色不匹配（切书场景），重置
-        if st.session_state.player_role_radio not in role_options:
-            st.session_state.player_role_radio = role_options[0]
-        chosen_role = st.session_state.player_role_radio
-        cols = st.columns(min(4, len(role_options)))
-        for k, role in enumerate(role_options):
-            with cols[k % len(cols)]:
-                btn_type = 'primary' if role == chosen_role else 'secondary'
-                if st.button(role, key=f'dlg_role_{role}', use_container_width=True, type=btn_type):
-                    st.session_state.player_role_radio = role
+    # ====== 步骤 ① 选剧本 ======
+    # 2026-08-24 主人反馈: 如果一本书只有 1 个剧本, 跳过这一步直接选角色
+    if len(scripts_list) == 1:
+        only_script = scripts_list[0]
+        # 自动选 (未选过时设上)
+        if not st.session_state.selected_script_id:
+            st.session_state.selected_script_id = only_script['id']
+            st.session_state.player_role_radio = None
+            st.rerun()
+        st.caption(f"🎬 这本书只有 1 个剧本: 《第 {only_script['chapter_index']+1} 册 · {only_script['n_scenes']} 场景》- 直接选角色")
+    else:
+        st.markdown('#### ① 选个剧本')
+        n_cols = min(3, len(scripts_list))
+        cols = st.columns(n_cols)
+        for i, s in enumerate(scripts_list):
+            with cols[i % n_cols]:
+                label = f"第 {s['chapter_index']+1} 册 · {s['n_scenes']} 场景"
+                p = progress_map.get(s['id'])
+                if p:
+                    if p['status'] == 'completed':
+                        label = f"✅ 第 {s['chapter_index']+1} 册 · 已通关"
+                    else:
+                        label = f"▶️ 第 {s['chapter_index']+1} 册 · Lv.{p['current_scene_idx']+1}/{s['n_scenes']}"
+                btn_type = 'primary' if st.session_state.selected_script_id == s['id'] else 'secondary'
+                if st.button(label, key=f'dlg_ch_{s["id"]}', use_container_width=True, type=btn_type):
+                    st.session_state.selected_script_id = s['id']
+                    # 切剧本时重置角色选择（避免跨剧本串场）
+                    st.session_state.player_role_radio = None
                     st.rerun()
 
-        # 确认开始
-        p = progress_map.get(target_script['id'])
-        resume_text = ''
-        if p and p['status'] == 'playing':
-            resume_text = f' (从 Lv.{p["current_scene_idx"]+1} 接着玩，之前得分 {p["total_score"]:.0f})'
-        elif p and p['status'] == 'completed':
-            resume_text = ' (上次通关了，这次从头来)'
-
+    # 未选剧本 → 不显示步骤 ②③
+    if not st.session_state.selected_script_id:
         st.markdown('---')
+        if st.button('✖ 退出去', key='dlg_close_step1', use_container_width=True):
+            st.session_state.show_script_modal = False
+            st.session_state.selected_book_id = None
+            st.session_state.selected_script_id = None
+            st.session_state.player_role_radio = None
+            st.rerun()
+        return
+
+    # ====== 步骤 ② 选角色（仅当选完剧本才显示）======
+    target_script = next((s for s in scripts_list if s['id'] == st.session_state.selected_script_id), scripts_list[0])
+    script_json = target_script['script_json']
+
+    # 构造 _role_id → 中文 _role_name 映射（v3.0 字段）
+    role_name_map: dict[str, str] = {}
+    for c in script_json.get('characters', {}).get('available_roles', []):
+        rid = c.get('role_id') or ''
+        rname = c.get('role_name') or ''
+        if rid and rname:
+            role_name_map[rid] = rname
+
+    # 收集 scenes 实际出现过的角色（scene.player_role + question.role_perspective）
+    scenes_roles: set = set()
+    for sc in script_json.get('scenes', []):
+        pr = (sc.get('player_role') or '').strip()
+        if pr:
+            scenes_roles.add(pr)
+        for q in sc.get('questions', []):
+            rp = (q.get('role_perspective') or '').strip()
+            if rp:
+                scenes_roles.add(rp)
+
+    # 从 _player_role_options 出发，最终展示 (label, value) 列表
+    raw_options = script_json.get('_player_role_options', [])
+    valid_labels: list[tuple[str, str]] = []  # (display_name, role_id)
+    for rid in raw_options:
+        rid = (rid or '').strip()
+        if not rid:
+            continue
+        # scenes 没出现 → 跳过（v2 scenes-based 校验）
+        if rid not in scenes_roles:
+            continue
+        # 中文名优先，缺失回退到 role_id
+        display = role_name_map.get(rid) or rid
+        valid_labels.append((display, rid))
+
+    # 兜底：scenes 里有但 options 缺 → 用 scenes 里的 role_id 直接显示
+    if not valid_labels and scenes_roles:
+        for rid in sorted(scenes_roles):
+            display = role_name_map.get(rid) or rid
+            valid_labels.append((display, rid))
+
+    # 终极兜底
+    if not valid_labels:
+        valid_labels = [('主角', '主角'), ('书童', '书童'), ('旁白', '旁白')]
+
+    # 警告条：检查哪些 role_id 缺失中文名（友好提示）
+    missing_cn = [(rid, role_name_map.get(rid, '?')) for rid in scenes_roles if rid not in role_name_map and not any(c for c in script_json.get('characters', {}).get('available_roles', []) if c.get('role_id') == rid)]
+    if missing_cn:
+        st.warning(f'⚠️ 以下角色缺中文名（fallback 到英文 ID）：{[m[0] for m in missing_cn]}')
+
+    st.markdown('#### ② 在这个故事里，你是谁？')
+    # 切换剧本时 radio 已被重置；如果当前 radio 不在新选项里也重置
+    current_ids = [v for _, v in valid_labels]
+    if st.session_state.player_role_radio not in current_ids:
+        st.session_state.player_role_radio = current_ids[0]
+    chosen_role_id = st.session_state.player_role_radio
+    cols = st.columns(min(4, len(valid_labels)))
+    for k, (display, rid) in enumerate(valid_labels):
+        with cols[k % len(cols)]:
+            btn_type = 'primary' if rid == chosen_role_id else 'secondary'
+            if st.button(display, key=f'dlg_role_{rid}', use_container_width=True, type=btn_type):
+                st.session_state.player_role_radio = rid
+                st.rerun()
+
+    # ====== 步骤 ③ 确认开玩（仅当选完角色才显示）======
+    p = progress_map.get(target_script['id'])
+    resume_text = ''
+    if p and p['status'] == 'playing':
+        resume_text = f' (从 Lv.{p["current_scene_idx"]+1} 接着玩，之前得分 {p["total_score"]:.0f})'
+    elif p and p['status'] == 'completed':
+        resume_text = ' (上次通关了，这次从头来)'
+
+    st.markdown('#### ③ 确认开玩')
+    # 找中文名用于提示
+    chosen_display = next((d for d, v in valid_labels if v == chosen_role_id), chosen_role_id)
+    st.info(f'你将以 **《{chosen_display}》** 身份进入《{sel_book["name"]}》{resume_text}')
+
+    st.markdown('---')
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button('✖ 退出去', key='dlg_close_final', use_container_width=True):
+            st.session_state.show_script_modal = False
+            st.session_state.selected_book_id = None
+            st.session_state.selected_script_id = None
+            st.session_state.player_role_radio = None
+            st.rerun()
+    with col2:
         btn_label = f'🚀 推开这扇门{resume_text}'
         if st.button(btn_label, key='dlg_start_play', type='primary', use_container_width=True):
             st.session_state.game_book_id = book_id
             st.session_state.game_book_name = sel_book['name']
             st.session_state.game_script_id = target_script['id']
-            st.session_state.player_role = chosen_role
+            st.session_state.player_role = chosen_role_id  # 存 role_id (逻辑层用)
+            st.session_state.player_role_display = chosen_display  # 中文名 (UI 显示用)
             st.session_state.game_script = script_json
             if p and p['status'] == 'playing':
                 st.session_state.game_scene_idx = p['current_scene_idx']
@@ -519,14 +603,6 @@ def _script_selector_modal(book_id: int):
             st.session_state.selected_script_id = None
             st.session_state.player_role_radio = None
             st.rerun()
-
-    st.markdown('---')
-    if st.button('✖ 退出去', key='dlg_close', use_container_width=True):
-        st.session_state.show_script_modal = False
-        st.session_state.selected_book_id = None
-        st.session_state.selected_script_id = None
-        st.session_state.player_role_radio = None
-        st.rerun()
 
 
 # ====== 页面：首页 ======
@@ -582,9 +658,15 @@ if page == '🏠 首页':
                                 st.button('🚧 暂无剧本', key=f"no_play_{b.get('id', i+j)}", disabled=True, help='先生成 pipeline 再玩')
                             else:
                                 if st.button('🎮 玩剧本', key=f"play_{b.get('id', i+j)}"):
+                                    # 修复 (2026-08-24 主人反馈): 首页「玩剧本」以前只跳页不弹 modal,
+                                    # 导致直接进入游戏。现在统一走三步 modal: 选剧本 → 选角色 → 进游戏。
                                     st.session_state['selected_book_id'] = b.get('id')
                                     st.session_state['selected_book_name'] = b.get('name')
-                                    # 跳到剧本杀页
+                                    # 切书/重选时强制重置剧本和角色,防上个书状态残留
+                                    st.session_state['selected_script_id'] = None
+                                    st.session_state['player_role_radio'] = None
+                                    st.session_state['show_script_modal'] = True
+                                    # 跳到剧本杀页 (剧本杀页负责弹 modal)
                                     st.session_state['force_page'] = '🎮 剧本杀'
                                     st.rerun()
     except Exception as e:

@@ -4,13 +4,25 @@
 主人 2026-08-22 钦定: 加用户隔离模块
 - 邮箱注册 + 简单验证 (bcrypt 哈希 + 邮箱格式)
 - 剧本进度恢复 (script_play_records)
+
+主人 2026-08-24 反馈: 刷新页面就要重登录。
+- 加 token 机制: 登录成功后生成 token, 写入 query_params
+- 页面初始化时从 query_params 读 token -> 还原 session
+- token 文件落 data/auth_tokens.json (手动失效机制)
 """
 import hashlib
+import json
 import re
 import secrets
+import time
+from pathlib import Path
 from typing import Optional
 
 from db import get_cursor
+
+# token 存储位置 (与 data/books.db 同级, 不上传 git)
+TOKEN_FILE = Path(__file__).parent.parent / 'data' / 'auth_tokens.json'
+TOKEN_TTL_SECONDS = 30 * 24 * 3600  # 30 天有效期
 
 EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 
@@ -81,6 +93,63 @@ def get_user(user_id: int) -> Optional[dict]:
     with get_cursor(dict_cursor=True) as cur:
         cur.execute('SELECT id, email, nickname FROM users WHERE id = %s', (user_id,))
         return cur.fetchone()
+
+
+# ============== Token 机制 (2026-08-24 主人反馈加) ==============
+
+def _load_tokens() -> dict:
+    """读 token 表 {token: {user_id, created_at, expires_at}}"""
+    if not TOKEN_FILE.exists():
+        return {}
+    try:
+        with TOKEN_FILE.open(encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_tokens(tokens: dict):
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with TOKEN_FILE.open('w', encoding='utf-8') as f:
+        json.dump(tokens, f, ensure_ascii=False, indent=2)
+
+
+def _cleanup_expired(tokens: dict) -> dict:
+    """过期的 token 清理掉"""
+    now = time.time()
+    return {t: v for t, v in tokens.items() if v.get('expires_at', 0) > now}
+
+
+def issue_token(user_id: int) -> str:
+    """生成 token, 存入文件, 返回 token 字符串"""
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    tokens = _cleanup_expired(_load_tokens())
+    tokens[token] = {
+        'user_id': user_id,
+        'created_at': now,
+        'expires_at': now + TOKEN_TTL_SECONDS,
+    }
+    _save_tokens(tokens)
+    return token
+
+
+def resolve_token(token: str) -> Optional[dict]:
+    """通过 token 拿 user 信息, 过期/不存在返回 None"""
+    if not token:
+        return None
+    tokens = _cleanup_expired(_load_tokens())
+    info = tokens.get(token)
+    if not info:
+        return None
+    return get_user(info['user_id'])
+
+
+def revoke_token(token: str):
+    """退出登录时调用"""
+    tokens = _load_tokens()
+    tokens.pop(token, None)
+    _save_tokens(tokens)
 
 
 # ============== 剧本进度记录 ==============

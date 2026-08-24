@@ -52,16 +52,24 @@ SYSTEM = '''你是顶级沉浸式剧本杀设计师。生成多题型 v2.3 第�
 
 def generate_script_and_tts(book_id: int, llm: LLMClient, force: bool = False,
                             skill_path: Optional[str] = None,
-                            mindmap_path: Optional[str] = None) -> Optional[int]:
-    """生成剧本 + TTS，返回 script_id"""
-    # 检测已有
-    existing = get_existing_script(book_id)
-    if existing and not force:
-        print(f'  ⏭️  script {existing} 已存在')
+                            mindmap_path: Optional[str] = None,
+                            chapter_range: Optional[tuple[int, int]] = None) -> Optional[int]:
+    """生成剧本 + TTS，返回 script_id
+
+    Args:
+        chapter_range: (start, end) 仅生成该 chapter_index 范围的剧本
+                       例: (0, 9) 生成第 0-9 章 (一个 story).
+                       用途: 一本书多个剧本 (2026-08-24 主人反馈)
+    """
+    # 检测已有 - chapter_range 指定时跳过重复检测 (因为要生成多个)
+    if not chapter_range:
+        existing = get_existing_script(book_id)
+        if existing and not force:
+            print(f'  ⏭️  script {existing} 已存在')
         return existing
 
     book_name = get_book_name(book_id)
-    full_text = load_chunks_text(book_id)
+    full_text = load_chunks_text(book_id, chapter_range=chapter_range)
 
     # ★ v3.0 (2026-08-24): 加载 book_meta (name + category) 给 enrich 用，避免跨书 IP 污染
     from db import get_cursor
@@ -89,7 +97,7 @@ def generate_script_and_tts(book_id: int, llm: LLMClient, force: bool = False,
         mindmap_ref = f'\n# 🗺️ 思维导图（参考）\n```mermaid\n{mm_text}\n```\n'
 
     # 选 5-8 段关键原文（开头/高潮/结尾/转折）
-    chunks_sample = load_chunks_sample(book_id, n=8)
+    chunks_sample = load_chunks_sample(book_id, n=8, chapter_range=chapter_range)
 
     user_prompt = f'''# 任务
 为《{book_name}》生成 v2.1 深度沉浸式剧本杀。
@@ -168,9 +176,10 @@ def generate_script_and_tts(book_id: int, llm: LLMClient, force: bool = False,
     # 后处理：补齐第一人称/player_role/world_state/consequences
     script_json = enrich_script_for_immersive(script_json, book_meta=book_meta)
 
-    # 写 PG
-    script_id = save_to_pg(book_id, script_json, provider)
-    print(f'  ✅ 剧本: {len(script_json["scenes"])} 场景')
+    # 写 PG - chapter_range 指定时设对应的 chapter_index, 让多个剧本可区分
+    ci = chapter_range[0] if chapter_range else 0
+    script_id = save_to_pg(book_id, script_json, provider, chapter_index=ci)
+    print(f'  ✅ 剧本 (chapter_index={ci}): {len(script_json["scenes"])} 场景')
 
     # TTS 预生成（每个场景的 narrator_intro）
     tts_count = generate_tts(script_json, TTS_DIR)
@@ -179,9 +188,20 @@ def generate_script_and_tts(book_id: int, llm: LLMClient, force: bool = False,
     return script_id
 
 
-def load_chunks_text(book_id: int) -> str:
+def load_chunks_text(book_id: int, chapter_range: Optional[tuple[int, int]] = None) -> str:
+    """读 book 的 chunks 文本拼接
+
+    Args:
+        chapter_range: (start, end) 仅取 chapter_index 在范围内的 chunk
+    """
     with get_cursor(dict_cursor=True) as cur:
-        cur.execute('SELECT chunk_text FROM chunks WHERE book_id = %s ORDER BY id', (book_id,))
+        if chapter_range:
+            cur.execute(
+                'SELECT chunk_text FROM chunks WHERE book_id = %s AND chapter_index >= %s AND chapter_index <= %s ORDER BY chapter_index, id',
+                (book_id, chapter_range[0], chapter_range[1]),
+            )
+        else:
+            cur.execute('SELECT chunk_text FROM chunks WHERE book_id = %s ORDER BY id', (book_id,))
         return ''.join(r['chunk_text'] for r in cur.fetchall())
 
 
@@ -434,14 +454,14 @@ def _fallback_skeleton(text: str, llm: LLMClient, user_prompt: str) -> dict:
     return {'version': '2.3-fallback', 'book_id': book_id, 'scenes': scenes}
 
 
-def save_to_pg(book_id: int, script_json: dict, provider: str) -> int:
+def save_to_pg(book_id: int, script_json: dict, provider: str, chapter_index: int = 0) -> int:
     script_hash = str(hash(json.dumps(script_json, sort_keys=True)))
     total_scenes = len(script_json.get('scenes', []))
     with get_cursor() as cur:
         cur.execute(
-            '''INSERT INTO game_scripts (book_id, game_type, script_json, script_hash, total_scenes, status, provider)
-               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id''',
-            (book_id, 'v2_mixed', json.dumps(script_json, ensure_ascii=False), script_hash, total_scenes, 'ready', provider),
+            '''INSERT INTO game_scripts (book_id, game_type, chapter_index, script_json, script_hash, total_scenes, status, provider)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id''',
+            (book_id, 'v2_mixed', chapter_index, json.dumps(script_json, ensure_ascii=False), script_hash, total_scenes, 'ready', provider),
         )
         return cur.fetchone()['id']
 
@@ -461,6 +481,25 @@ def generate_tts(script_json: dict, tts_dir: Path) -> int:
     tts_dir.mkdir(parents=True, exist_ok=True)
     count = 0
 
+    async def gen_one(text: str, audio_path: Path) -> bool:
+        """单场景生成，带重试（2026-08-24 补：edge-tts 偶发 'No audio was received'）"""
+        for attempt in range(3):
+            try:
+                communicate = edge_tts.Communicate(text, voice='zh-CN-YunxiNeural')
+                await asyncio.to_thread(communicate.save_sync if hasattr(communicate, 'save_sync') else None) if False else await communicate.save(str(audio_path))
+                # 校验非空且大小合理（>1KB）
+                if audio_path.exists() and audio_path.stat().st_size > 1024:
+                    return True
+                log(f'  ⚠️  TTS {audio_path.stem} 第{attempt+1}次输出异常({audio_path.stat().st_size if audio_path.exists() else 0}B), 重试...')
+                if audio_path.exists():
+                    audio_path.unlink()
+            except Exception as e:
+                log(f'  ⚠️  TTS {audio_path.stem} 第{attempt+1}次失败: {e}')
+                if audio_path.exists():
+                    audio_path.unlink()  # 删空文件防下次跳过
+                await asyncio.sleep(1.5 * (attempt + 1))
+        return False
+
     async def gen_all():
         nonlocal count
         for scene in script_json.get('scenes', []):
@@ -469,14 +508,12 @@ def generate_tts(script_json: dict, tts_dir: Path) -> int:
             if not text:
                 continue
             audio_path = tts_dir / f'{sid}.mp3'
-            if audio_path.exists():
+            if audio_path.exists() and audio_path.stat().st_size > 1024:
                 continue
-            try:
-                communicate = edge_tts.Communicate(text, voice='zh-CN-YunxiNeural')
-                await communicate.save(str(audio_path))
+            if await gen_one(text, audio_path):
                 count += 1
-            except Exception as e:
-                print(f'  ⚠️  TTS {sid} 失败: {e}')
+            else:
+                log(f'  ❌ TTS {sid} 3 次重试全败, 跳过')
 
     asyncio.run(gen_all())
     return count
