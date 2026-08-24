@@ -391,14 +391,13 @@ def render_auth_form():
 
 # ============== Modal: 选剧本 & 选角色 (Streamlit 1.31+ @st.dialog) ==============
 
-@st.dialog('🎭 选剧本 & 选角色', width='large')
+@st.dialog('🎭 选剧本 → 选角色', width='large')
 def _script_selector_modal(book_id: int):
-    """选剧本 → 选角色 → 开始游戏
+    """分步流：选剧本 → 选角色 → 开始游戏
 
-    历史教训 (2026-08-23 主人反馈截图): 之前用自定义 HTML/CSS modal (行 553-697),
-    但 Streamlit 的 st.markdown 不会嵌套 HTML div, 导致 .script-modal-shell 容器是空的,
-    只有深色背景显示出来 = 黑色横条挡住内容。改用 @st.dialog 后, Streamlit 自动管理
-    backdrop + 居中 + ESC 关闭, 不依赖任何 HTML/CSS hack。
+    历史教训 (2026-08-24 主人反馈 bug fix): 旧版 SUSPICIOUS_CHARS 硬编码误判
+    （福尔摩斯本尊的书也被标"跨书串场"）。新版基于 scenes 实际角色校验：
+    _player_role_options 里的角色必须在 scenes 也出现才算合法。
     """
     sel_book = get_book(book_id)
     if not sel_book:
@@ -453,23 +452,30 @@ def _script_selector_modal(book_id: int):
         script_json = target_script['script_json']
         role_options = script_json.get('_player_role_options', [])
 
-        # ★ B 防御 (2026-08-23 主人反馈 bug fix):
-        # 1. 如果 _player_role_options 为空, 从 scenes 扫 role_perspective fallback
-        # 2. 如果 _player_role_options 含"跨书串场"角色 (如汪曾祺剧本里出现华生/福尔摩斯),
-        #    强制以 scenes 为准, 避免给玩家看到错位角色
-        SUSPICIOUS_CHARS = {'华生', '福尔摩斯', '莫斯坦', '巴塞洛缪', '斯莫尔', '华生医生', '哈利', '赫敏', '罗恩', '霍格沃茨', '江户川', '柯南', '毛利'}
-        has_foreign = any(any(sc_word in r for sc_word in SUSPICIOUS_CHARS) for r in role_options)
-        if not role_options or has_foreign:
-            seen = set()
-            for sc in script_json.get('scenes', []):
-                for q in sc.get('questions', []):
-                    rp = (q.get('role_perspective') or '').strip()
-                    if rp:
-                        seen.add(rp)
-            computed = sorted(seen)
-            if has_foreign:
-                st.warning(f'⚠️ 检测到剧本角色数据错位（_player_role_options 含{"、".join(repr(r) for r in role_options if any(sc in r for sc in SUSPICIOUS_CHARS))}），已自动以场景实际角色为准。')
-            role_options = computed or ['主角', '书童', '旁白']
+        # ★ B 防御 v2 (2026-08-24 主人反馈 bug fix):
+        # 旧版用硬编码 SUSPICIOUS_CHARS 误判（福尔摩斯本尊也被标污染）
+        # 新版基于 scenes 实际角色校验：_player_role_options 里出现的角色
+        # 必须在 scenes（scene.player_role 或 question.role_perspective）也出现才算合法
+        scenes_roles: set = set()
+        for sc in script_json.get('scenes', []):
+            pr = (sc.get('player_role') or '').strip()
+            if pr:
+                scenes_roles.add(pr)
+            for q in sc.get('questions', []):
+                rp = (q.get('role_perspective') or '').strip()
+                if rp:
+                    scenes_roles.add(rp)
+
+        foreign_roles = [r for r in role_options if r not in scenes_roles]
+        valid_roles = [r for r in role_options if r in scenes_roles]
+        if foreign_roles:
+            st.warning(f'⚠️ _player_role_options 含 scenes 中未出现的角色 {foreign_roles}，已自动剔除并以 scenes 角色为准。')
+        if valid_roles:
+            role_options = valid_roles
+        elif scenes_roles:
+            role_options = sorted(scenes_roles)
+        else:
+            role_options = ['主角', '书童', '旁白']
 
         st.markdown('#### 🎭 在这个故事里，你是谁？')
         # 如果 radio 与当前书的可选角色不匹配（切书场景），重置
