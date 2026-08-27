@@ -92,13 +92,46 @@ def parse_epub(file_path: Path) -> list[tuple[str, str]]:
     book = epub.read_epub(str(file_path))
     chapters = []
 
+    # 铲屎官 2026-08-25 钩定: 过滤版权页/封面/目录页等非正文
+    # (book 27 ch=0 "版权信息 书名 ISBN" / book 27 ch=1 "目录" 都是该过滤的)
+    SKIP_PATTERNS = (
+        'copyright', 'cover', 'titlepage', 'colophon', 'imprint',
+        'nav', 'toc',  # 目录文件
+        'index', 'glossary', 'colophon',  # 索引
+    )
+    SKIP_CONTENT_PREFIXES = (
+        '版 权', '版权', 'Copyright', 'COPYRIGHT',
+        '图书在版编目', 'CIP', 'ISBN',  # 版权信息标记
+        'All rights reserved', '©',
+        '目  录', '目 录', '目录', '总目录',  # 目录页
+    )
+    MIN_CONTENT_LEN = 50  # 太短的 (e.g. "上册") 跳过
+
     for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+        name = item.get_name().lower() if hasattr(item, 'get_name') else ''
+        # 文件名过滤
+        if any(p in name for p in SKIP_PATTERNS):
+            continue
+
         content = item.get_content().decode('utf-8', errors='ignore')
         soup = BeautifulSoup(content, 'lxml')
         text = soup.get_text(separator='\n', strip=True)
-        if text.strip():
-            title = soup.title.string if soup.title else ''
-            chapters.append((title or 'Untitled', text))
+        if not text.strip():
+            continue
+
+        # 内容前缀过滤
+        text_start = text.strip()[:30].replace('\n', ' ').replace(' ', ' ')
+        if any(text_start.startswith(prefix.replace(' ', ' ')) for prefix in SKIP_CONTENT_PREFIXES):
+            print(f'  ⏭️  跳过非正文: {item.get_name()} (前 30 字符: {text_start[:30]!r})')
+            continue
+
+        # 太短跳过
+        if len(text.strip()) < MIN_CONTENT_LEN:
+            print(f'  ⏭️  跳过过短章节: {item.get_name()} ({len(text.strip())} chars)')
+            continue
+
+        title = soup.title.string if soup.title else ''
+        chapters.append((title or 'Untitled', text))
 
     # 也加 toc 作为参考
     return chapters

@@ -84,8 +84,47 @@ def run_full_pipeline(book_id, config, llm, force=False, books_mode=False):
     generate_skill(book_id, llm, force=force, mindmap_path=mindmap_path)
 
     # Step 5-6: script + tts（参考 skill + mindmap）
+    # 铲屎官 2026-08-25 钩定: 必须传 skill_path + mindmap_path, 否则走了默认路径找不到
+    skill_path = f'skills/book_{book_id}_SKILL.md'
+    if not Path(skill_path).exists():
+        skill_path = f'data/{book_id}_SKILL.md'
+    if not Path(skill_path).exists():
+        skill_path = None
     from generate_script import generate_script_and_tts
-    generate_script_and_tts(book_id, llm, force=force)
+    generate_script_and_tts(book_id, llm, force=force,
+                            skill_path=skill_path,
+                            mindmap_path=mindmap_path)
+
+    # Step 6.5: auto-split（铲屎官 2026-08-25 反馈: 49/56 种合集只生成 1 剧本严重不足）
+    # 触发条件: 真实章节 > 50 且未覆盖章节 > 50% → 自动拆 (idempotent: 已覆盖则跳)
+    from db import get_cursor
+    with get_cursor() as cur:
+        cur.execute("SELECT chapter_index FROM game_scripts WHERE book_id = %s", (book_id,))
+        covered = {r['chapter_index'] for r in cur.fetchall()}
+    # 拿真实 chapters (和 split_book_scripts 同口径: char_count>=200)
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT chapter_index FROM chunks "
+            "WHERE book_id = %s AND char_count >= 200 ORDER BY chapter_index",
+            (book_id,),
+        )
+        real_chs = [r['chapter_index'] for r in cur.fetchall()]
+    n_real = len(real_chs)
+    uncovered = [c for c in real_chs if c not in covered]
+    SPLIT_THRESHOLD = 50
+    if n_real > SPLIT_THRESHOLD and len(uncovered) > n_real * 0.5:
+        print(f'\n📦 检测到合集书未完整拆分 (chapters={n_real}, 未覆盖={len(uncovered)}), 自动 split...')
+        from split_book_scripts import main as split_main
+        import sys as _sys
+        _sys.argv = ['split_book_scripts.py', '--book-id', str(book_id), '--group-size', '80', '--min-chars', '200']
+        try:
+            split_main()
+        except SystemExit:
+            pass
+        except Exception as ex:
+            print(f'⚠️ split 失败 (不影响主流程): {ex}')
+    else:
+        print(f'📖 book={book_id} chapters={n_real}, scripts={len(covered)} (无需 split)')
 
     # Step 7: summary（参考 skill + mindmap）
     from generate_summary import generate_summary

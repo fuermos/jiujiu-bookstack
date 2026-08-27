@@ -50,7 +50,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Python 依赖（先复制 requirements 利用层缓存）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 国内主机 PyPI 不通, 优先阿里云镜像, 歉备清华源 (铲屎官 2026-08-26 rebuild 加速)
+RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
+    pip config set global.extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip config set global.trusted-host "mirrors.aliyun.com pypi.tuna.tsinghua.edu.cn" && \
+    pip install --no-cache-dir -r requirements.txt
 
 # 项目代码
 COPY scripts/ ./scripts/

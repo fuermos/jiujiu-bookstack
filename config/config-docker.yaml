@@ -29,7 +29,7 @@ database:
   host: postgres
   port: 5432
   user: admin
-  password: changeme
+  password: postgres_pwd_change_me  # 同步 docker-compose.yml 默认密码
   dbname: jiujiu_mind
 
 pipeline:

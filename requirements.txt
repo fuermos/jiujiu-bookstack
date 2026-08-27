@@ -17,3 +17,4 @@ pytest-asyncio>=0.23.0
 
 # Web UI
 streamlit>=1.30.0
+edge-tts>=6.1.0  # 微软 Edge TTS (剧本旁白)

@@ -51,7 +51,22 @@ def generate_summary(book_id: int, llm: LLMClient, force: bool = False,
         mm_text = mp.read_text(encoding='utf-8')[:1800]
         mindmap_ref = f'\n\n# 🗺️ 思维导图\n```mermaid\n{mm_text}\n```\n'
 
-    user_msg = f'请为以下图书生成摘要：{skill_ref}{mindmap_ref}\n\n{full_text[:500000]}'
+    # 适配模型 max_input_tokens (铲屎官 2026-08-25 钓定: 避免大书撑爆小模型)
+    # 中文 1 token ≈ 1.5 chars, 留 33% buffer 给 system + response
+    max_input_tokens = llm.get_max_input_tokens(0)  # primary
+    SYSTEM_CHARS = len(SYSTEM)
+    SKILL_CHARS = 2500
+    MINDMAP_CHARS = 1800
+    RESPONSE_CHARS = int(2000 * 1.5)  # 3000 chars for response
+    BUFFER = int(max_input_tokens * 1.5 * 0.15)  # 15% 安全 buffer
+    available_chars = int(max(
+        5000,  # 至少 5K chars (避免完全丢内容)
+        max_input_tokens * 1.5 - SYSTEM_CHARS - SKILL_CHARS - MINDMAP_CHARS - RESPONSE_CHARS - BUFFER
+    ))
+    truncated = len(full_text) > available_chars
+    if truncated:
+        print(f'  📊 model max_input_tokens={max_input_tokens}, full_text 限 {available_chars} chars (原 {len(full_text)})')
+    user_msg = f'请为以下图书生成摘要：{skill_ref}{mindmap_ref}\n\n{full_text[:available_chars]}'
 
     print(f'  🤖 book={book_id} 生成 summary ...')
     text, provider = llm.call(SYSTEM, user_msg, max_tokens=2000, temperature=0.5)

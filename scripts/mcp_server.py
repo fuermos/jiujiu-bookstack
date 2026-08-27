@@ -116,18 +116,19 @@ def tool_list_books(args, cur):
     category = args.get("category")
     limit = min(int(args.get("limit", 20)), 100)
     offset = int(args.get("offset", 0))
+    # 2026-08-24 主人反馈: JOIN game_scripts 让有多个剧本的书 (如福尔摩斯 11 条) 返回多行
+    # → streamlit 重复 key='play_24' 报错。改用 EXISTS 子查询避免膨胀。
     sql = """SELECT b.id, b.name, b.category, b.summary, b.cover_url,
-        (gs.id IS NOT NULL) AS has_script,
-        (bm.book_id IS NOT NULL) AS has_mindmap
-        FROM books b
-        LEFT JOIN game_scripts gs ON gs.book_id = b.id
-        LEFT JOIN book_mindmaps bm ON bm.book_id = b.id"""
+        EXISTS(SELECT 1 FROM game_scripts WHERE book_id = b.id) AS has_script,
+        EXISTS(SELECT 1 FROM book_mindmaps WHERE book_id = b.id) AS has_mindmap,
+        (SELECT COUNT(*) FROM game_scripts WHERE book_id = b.id) AS total_scripts
+        FROM books b"""
     if category:
         sql += " WHERE b.category=%s"
         params = (category, limit, offset)
     else:
         params = (limit, offset)
-    sql += " GROUP BY b.id, gs.id, bm.book_id ORDER BY b.id LIMIT %s OFFSET %s"
+    sql += " ORDER BY b.id LIMIT %s OFFSET %s"
     cur.execute(sql, params)
     return json.dumps([dict(r) for r in cur.fetchall()], ensure_ascii=False, indent=2, default=str)
 

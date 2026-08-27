@@ -4,10 +4,14 @@
 输入: chunks + SKILL.md + mindmap
 输出: game_scripts 表 + tts/*.mp3 音频
 """
+import sys
 import json
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+
+ROOT = Path(__file__).parent.parent  # 铲屎官 2026-08-25 补: 之前改路径引入 ROOT 未定义 bug
+sys.path.insert(0, str(ROOT / 'scripts'))
 
 from db import get_cursor
 from llm_client import LLMClient
@@ -66,7 +70,7 @@ def generate_script_and_tts(book_id: int, llm: LLMClient, force: bool = False,
         existing = get_existing_script(book_id)
         if existing and not force:
             print(f'  ⏭️  script {existing} 已存在')
-        return existing
+            return existing
 
     book_name = get_book_name(book_id)
     full_text = load_chunks_text(book_id, chapter_range=chapter_range)
@@ -84,14 +88,26 @@ def generate_script_and_tts(book_id: int, llm: LLMClient, force: bool = False,
         print(f'  ⚠️ book_meta 加载失败: {e}')
 
     # 注入 skill + mindmap
+    # 铲屎官 2026-08-25 钩定: 优先项目内路径, 最后兜底 ~/.openclaw/skill-archive/
     skill_ref = ''
-    sp = Path(skill_path) if skill_path else Path.home() / '.openclaw' / 'skill-archive' / 'books' / book_name.replace(' ', '-') / 'SKILL.md'
+    if skill_path:
+        sp = Path(skill_path)
+    else:
+        # 项目内路径优先 (skills/ → data/), 最后兜底全局
+        sp = (ROOT / 'skills' / f'book_{book_id}_SKILL.md')
+        if not sp.exists():
+            sp = (ROOT / 'data' / f'{book_id}_SKILL.md')
+        if not sp.exists():
+            sp = Path.home() / '.openclaw' / 'skill-archive' / 'books' / book_name.replace(' ', '-') / 'SKILL.md'
     if sp.exists():
         skill_text = sp.read_text(encoding='utf-8')[:3000]
         skill_ref = f'\n# 📋 SKILL.md（参考）\n```\n{skill_text}\n```\n'
 
     mindmap_ref = ''
-    mp = Path(mindmap_path) if mindmap_path else Path(f'mindmaps/{book_id}.mmd')
+    if mindmap_path:
+        mp = Path(mindmap_path)
+    else:
+        mp = (ROOT / 'mindmaps' / f'{book_id}.mmd')
     if mp.exists():
         mm_text = mp.read_text(encoding='utf-8')[:2000]
         mindmap_ref = f'\n# 🗺️ 思维导图（参考）\n```mermaid\n{mm_text}\n```\n'
@@ -178,6 +194,12 @@ def generate_script_and_tts(book_id: int, llm: LLMClient, force: bool = False,
 
     # 写 PG - chapter_range 指定时设对应的 chapter_index, 让多个剧本可区分
     ci = chapter_range[0] if chapter_range else 0
+    # chapter_range 指定时检查是否已存在
+    if chapter_range and not force:
+        existing = get_existing_script(book_id, chapter_index=ci)
+        if existing:
+            print(f'  ⏭️  chapter_index={ci} 已存在 script_id={existing}, 跳过')
+            return existing
     script_id = save_to_pg(book_id, script_json, provider, chapter_index=ci)
     print(f'  ✅ 剧本 (chapter_index={ci}): {len(script_json["scenes"])} 场景')
 
@@ -205,10 +227,16 @@ def load_chunks_text(book_id: int, chapter_range: Optional[tuple[int, int]] = No
         return ''.join(r['chunk_text'] for r in cur.fetchall())
 
 
-def load_chunks_sample(book_id: int, n: int = 8) -> list[str]:
-    """均匀采样 n 个 chunk"""
+def load_chunks_sample(book_id: int, n: int = 8, chapter_range: Optional[tuple[int, int]] = None) -> list[str]:
+    """均匀采样 n 个 chunk (2026-08-24 加 chapter_range 支持)"""
     with get_cursor(dict_cursor=True) as cur:
-        cur.execute('SELECT chunk_text FROM chunks WHERE book_id = %s ORDER BY id', (book_id,))
+        if chapter_range:
+            cur.execute(
+                'SELECT chunk_text FROM chunks WHERE book_id = %s AND chapter_index >= %s AND chapter_index <= %s ORDER BY chapter_index, id',
+                (book_id, chapter_range[0], chapter_range[1]),
+            )
+        else:
+            cur.execute('SELECT chunk_text FROM chunks WHERE book_id = %s ORDER BY id', (book_id,))
         chunks = [r['chunk_text'] for r in cur.fetchall()]
     if len(chunks) <= n:
         return chunks
@@ -222,12 +250,23 @@ def get_book_name(book_id: int) -> str:
         return cur.fetchone()['name']
 
 
-def get_existing_script(book_id: int) -> Optional[int]:
+def get_existing_script(book_id: int, chapter_index: Optional[int] = None) -> Optional[int]:
+    """拿这本书已存在的脚本 id
+
+    Args:
+        chapter_index: 指定时只查该 chapter_index 的 (福尔摩斯多剧本场景)
+    """
     with get_cursor(dict_cursor=True) as cur:
-        cur.execute(
-            'SELECT id FROM game_scripts WHERE book_id = %s AND game_type LIKE %s ORDER BY id DESC LIMIT 1',
-            (book_id, 'v2\\_%'),
-        )
+        if chapter_index is not None:
+            cur.execute(
+                'SELECT id FROM game_scripts WHERE book_id = %s AND chapter_index = %s ORDER BY id DESC LIMIT 1',
+                (book_id, chapter_index),
+            )
+        else:
+            cur.execute(
+                'SELECT id FROM game_scripts WHERE book_id = %s AND game_type LIKE %s ORDER BY id DESC LIMIT 1',
+                (book_id, 'v2\\_%'),
+            )
         row = cur.fetchone()
         return row['id'] if row else None
 
@@ -279,8 +318,18 @@ def enrich_script_for_immersive(script_json: dict, book_meta: dict = None) -> di
     现在改为：① LLM 写的 characters.available_roles 为权威
              ② 缺失时从 book_meta 推导
              ③ 兜底用安全标签
+
+    铲屎官 2026-08-25 补: 防御 LLM 返回异常 JSON (不是 dict 或缺 scenes 字段)
     """
-    scenes = script_json.get('scenes', [])
+    # 防御: LLM 可能返回 list/str/缺字段
+    if not isinstance(script_json, dict):
+        log(f'⚠️ enrich 收到非 dict 输入 ({type(script_json).__name__}), 转为空剧本')
+        script_json = {'scenes': []}
+    scenes = script_json.get('scenes') or []
+    if not isinstance(scenes, list):
+        log(f'⚠️ scenes 不是 list ({type(scenes).__name__}), 转为空列表')
+        scenes = []
+    script_json['scenes'] = scenes
 
     # ★ v3.0: 优先读 LLM 写的 characters.available_roles
     characters = script_json.get('characters', {})
@@ -411,9 +460,9 @@ def parse_json_with_retry(text: str, llm: LLMClient, user_prompt: str, max_retri
 
 def _fallback_skeleton(text: str, llm: LLMClient, user_prompt: str) -> dict:
     """LLM 多次失败时，从原文 8 个 chunks 生成简化骨架剧本"""
-    # 从 user_prompt 提取 book_id
+    # 从 user_prompt 提取 book_id (铲屎官 2026-08-25 修复: prompt 里实际是 "- ID: {book_id}", 之前 regex 永远匹配不到)
     import re
-    m = re.search(r'book_id[\":\s]+(\d+)', user_prompt)
+    m = re.search(r'-\s*ID[\":\s]+(\d+)', user_prompt)
     book_id = int(m.group(1)) if m else 0
     if not book_id:
         return {"scenes": []}
@@ -457,13 +506,32 @@ def _fallback_skeleton(text: str, llm: LLMClient, user_prompt: str) -> dict:
 def save_to_pg(book_id: int, script_json: dict, provider: str, chapter_index: int = 0) -> int:
     script_hash = str(hash(json.dumps(script_json, sort_keys=True)))
     total_scenes = len(script_json.get('scenes', []))
+    # 铲屎官 2026-08-25 钩定: ON CONFLICT DO UPDATE, force 重跑不报 UniqueViolation
     with get_cursor() as cur:
         cur.execute(
             '''INSERT INTO game_scripts (book_id, game_type, chapter_index, script_json, script_hash, total_scenes, status, provider)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id''',
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (book_id, chapter_index, game_type) DO UPDATE
+               SET script_json=EXCLUDED.script_json,
+                   script_hash=EXCLUDED.script_hash,
+                   total_scenes=EXCLUDED.total_scenes,
+                   status=EXCLUDED.status,
+                   provider=EXCLUDED.provider,
+                   updated_at=now()
+               RETURNING id''',
             (book_id, 'v2_mixed', chapter_index, json.dumps(script_json, ensure_ascii=False), script_hash, total_scenes, 'ready', provider),
         )
-        return cur.fetchone()['id']
+        script_id = cur.fetchone()['id']
+        # 同步 books.total_scenes 避免 web UI 显示 0 (2026-08-25 补: 避免手动 UPDATE)
+        # 合集书有多剧本时: SUM 所有剧本的 scenes
+        cur.execute(
+            'UPDATE books SET total_scenes = '
+            '(SELECT COALESCE(SUM(total_scenes), 0) FROM game_scripts WHERE book_id = %s), '
+            'game_type = %s '
+            'WHERE id = %s',
+            (book_id, 'v2_mixed', book_id),
+        )
+    return script_id
 
 
 def generate_tts(script_json: dict, tts_dir: Path) -> int:

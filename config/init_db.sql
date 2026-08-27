@@ -138,3 +138,20 @@ CREATE TABLE IF NOT EXISTS sensitive_discoveries (
     source_book_id INTEGER,
     discovered_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+-- ============== pipeline_jobs (v0.5 任务队列, 铲屎官 2026-08-25 钓定) ==============
+CREATE TABLE IF NOT EXISTS pipeline_jobs (
+    id SERIAL PRIMARY KEY,
+    book_id INT,
+    book_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',  -- queued/running/completed/failed/cancelled
+    current_step TEXT DEFAULT 'queued',
+    step_progress INT DEFAULT 0,
+    step_total INT DEFAULT 0,
+    log_path TEXT,
+    error TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS pipeline_jobs_status_idx ON pipeline_jobs(status, id);

@@ -243,3 +243,12 @@ tmp/
 *.bak
 *~
 books/
+
+# Auth tokens (sensitive, regenerated on container rebuild)
+data/auth_tokens.json
+
+# Pipeline worker runtime data (regenerated)
+pipeline_jobs_runtime.json
+
+# Sensitive words discovery log
+data/sensitive_discoveries.log
