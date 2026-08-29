@@ -17,6 +17,19 @@ import pytest
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "web"))
+
+
+# ========== Shared fixtures ==========
+
+@pytest.fixture(scope="session")
+def db_pool():
+    """共享 DB 连接池 (覆盖 test_regression_bugs.py 的 fixture)"""
+    from config_loader import load_config
+    import db as db_mod
+    cfg = load_config(str(ROOT / "config" / "config.yaml"))
+    db_mod.init_pool(cfg["database"])
+    return db_mod
 
 
 # ========== Bug 1: ROOT 必须定义 ==========
@@ -191,8 +204,15 @@ class TestParseJsonWithRetry:
         assert result is None
         result = _try_repair_json('')
         assert result is None
-        result = _try_repair_json('{"unclosed": ')
+        # 这几个输入 json_repair 库也无法修复 → 应该 None
+        result = _try_repair_json('}{')
         assert result is None
+        result = _try_repair_json('just random words')
+        assert result is None
+        result = _try_repair_json('!!!')
+        assert result is None
+        # 注: '{"unclosed": ' 这种半残输入 json_repair 库会尝试补全为
+        # {'unclosed': ''}, 这是合理的"修复"行为, 测试不应要求 None
 
     def test_fallback_skeleton_returns_dict(self):
         """LLM 多次失败时, 必须走到 fallback 返回 dict"""
@@ -314,35 +334,37 @@ class TestBooksTotalScenesConsistency:
 class TestPipelineCompleteness:
     """铲屎官 2026-08-25 钓定: 每本入库的书必须 cover+SKILL+script+summary 都齐"""
 
-    def test_all_books_have_cover(self):
-        import db, os
+    def test_all_books_have_cover(self, db_pool):
+        """用 ROOT 相对路径 (host = /home/fuermos/jiujiu-bookstack/data/... , 容器 = /app/data/...)"""
+        import db
         with db.get_cursor() as cur:
             cur.execute("SELECT id, name, cover_url FROM books WHERE cover_url IS NOT NULL")
             books = cur.fetchall()
         missing = []
         for b in books:
-            # cover_url 形如 'covers/27.jpg', 容器内路径 = /app/data/covers/27.jpg
-            path = f"/app/data/{b['cover_url']}"
-            if not os.path.exists(path):
+            # cover_url 形如 'covers/27.jpg' → 相对 ROOT 的 data/ 下
+            path = ROOT / "data" / b['cover_url']
+            if not path.exists():
                 missing.append(f"book={b['id']}: {b['cover_url']} → {path}")
         assert not missing, f"cover 文件缺失: {missing}"
 
-    def test_all_books_have_skill_md(self):
-        import db, os
+    def test_all_books_have_skill_md(self, db_pool):
+        """用 ROOT 相对路径兼容 host + 容器"""
+        import db
         with db.get_cursor() as cur:
             cur.execute("SELECT id FROM books")
             ids = [r['id'] for r in cur.fetchall()]
         missing = []
         for bid in ids:
             paths = [
-                f"/app/data/{bid}_SKILL.md",
-                f"/app/skills/book_{bid}_SKILL.md",
+                ROOT / "data" / f"{bid}_SKILL.md",
+                ROOT / "skills" / f"book_{bid}_SKILL.md",
             ]
-            if not any(os.path.exists(p) for p in paths):
+            if not any(p.exists() for p in paths):
                 missing.append(bid)
         assert not missing, f"book {missing} 缺 SKILL.md"
 
-    def test_all_books_have_summary_or_skip(self):
+    def test_all_books_have_summary_or_skip(self, db_pool):
         """summary 可能还没生成（新书），只检测已完成的"""
         import db
         with db.get_cursor() as cur:

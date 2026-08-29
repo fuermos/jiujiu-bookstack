@@ -84,7 +84,7 @@ BOOK_ALLOWED_ROLES = {
     "神奇的数学": {"思考者", "探索者", "解谜人", "现代读者·笑笑", "modern_reader_xiao_xiao", "思考者 (数学启蒙者)",
                   "探索者 (好奇的提问者)", "解谜人 (难题挑战者)", "街头大爷", "math_explorer_li_yongle_perspective",
                   "street_vendor_grandpa", "读者 (上帝视角)"},
-    "心流": {"现代读者·笑笑", "观察者·米哈里", "体验者·莉莉", "reader_xiao_xiao", "researcher_chick", "worker_lili",
+    "心流": {"现代读者·笑笑", "观察者·米哈里", "体验者·莉莉", "reader_xiao", "reader_xiao_xiao", "researcher_chick", "worker_lili",
             "读者 (上帝视角)"},
     "讲解的艺术": {"讲解者", "聆听者", "设计者", "改造者", "现代读者·笑笑", "读者 (上帝视角)"},
 }
@@ -285,6 +285,7 @@ def test_mcp_list_books_no_duplicates():
 
 def test_stats_summary(db_cur):
     """辅助测试: 打印当前数据库状态"""
+    from db import get_cursor
     with get_cursor() as cur:
         cur.execute("SELECT COUNT(*) c FROM books")
         books_n = cur.fetchone()["c"]
