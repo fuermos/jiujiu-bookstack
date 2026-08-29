@@ -22,6 +22,27 @@ llm:
       api_key: ollama                 # 本地无需 Key
       model: qwen2.5-72b
 
+# ===== 在线模式预设 (主人 2026-08-29 钦定备用) =====
+# 本地 LM Studio (192.168.0.14:2345) 被占时, 把 primary 换成云端,
+# fallback 链顺延. 恢复时反过来改回 local-lmstudio 即可.
+#
+# 推荐组合 (主 qwen-long + 备 minimax-M3):
+#   primary:
+#     name: qwen-long-dashscope
+#     provider: openai
+#     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+#     api_key: sk-xxxxx            # 阿里 DashScope API Key
+#     model: qwen-long              # 1M context, 中文场景覆盖优秀
+#   fallback:
+#     - name: minimax-anthropic
+#       provider: anthropic
+#       base_url: https://api.minimaxi.com/anthropic
+#       api_key: ""                  # LLM_MINIMAX_ANTHROPIC_API_KEY env
+#       model: MiniMax-M3
+#
+# 经验: 主人 2026-08-29 实测 qwen-long 比 minimax-M3 在剧本生成/SKILL 质量
+# 上明显更好 (Chapter Index + Anti-Patterns 是 qwen 独有), 价格也更低
+
 # ====== 向量配置 ======
 embedding:
   base_url: http://localhost:1234/v1   # 本地 LM Studio 或 OpenAI
