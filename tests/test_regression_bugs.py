@@ -85,7 +85,12 @@ BOOK_ALLOWED_ROLES = {
                   "探索者 (好奇的提问者)", "解谜人 (难题挑战者)", "街头大爷", "math_explorer_li_yongle_perspective",
                   "street_vendor_grandpa", "读者 (上帝视角)"},
     "心流": {"现代读者·笑笑", "观察者·米哈里", "体验者·莉莉", "reader_xiao", "reader_xiao_xiao", "researcher_chick", "worker_lili",
-            "读者 (上帝视角)"},
+            "读者 (上帝视角)",
+            # minimax-anthropic (M3) 命名风格别名 (2026-08-29 发现:
+            # local qwen3.8-27b vs cloud minimax 角色 ID 不一致,
+            # 防止后续云端跑出同样的脚本被误报污染)
+            "reader_xiaoxiao", "mihaly_observer", "jim_harris_teen",
+            "xiaoxiao_reader", "mihaly_guide", "teen_explorer"},
     "讲解的艺术": {"讲解者", "聆听者", "设计者", "改造者", "现代读者·笑笑", "读者 (上帝视角)"},
 }
 
