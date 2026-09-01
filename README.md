@@ -8,6 +8,12 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![PG 14+](https://img.shields.io/badge/postgres-14+-blue.svg)](https://www.postgresql.org/)
 [![MCP](https://img.shields.io/badge/MCP-stdio-green.svg)](https://modelcontextprotocol.io/)
+[![GitHub stars](https://img.shields.io/github/stars/fuermos/jiujiu-bookstack?style=social)](https://github.com/fuermos/jiujiu-bookstack/stargazers)
+[![Latest Release](https://img.shields.io/github/v/release/fuermos/jiujiu-bookstack?include_prereleases)](https://github.com/fuermos/jiujiu-bookstack/releases)
+[![Last Commit](https://img.shields.io/github/last-commit/fuermos/jiujiu-bookstack)](https://github.com/fuermos/jiujiu-bookstack/commits/main)
+[![Issues](https://img.shields.io/github/issues/fuermos/jiujiu-bookstack)](https://github.com/fuermos/jiujiu-bookstack/issues)
+[![Maintenance](https://img.shields.io/maintenance/yes/2026)](https://github.com/fuermos/jiujiu-bookstack)
+[![Made with ❤️ by 九九喵](https://img.shields.io/badge/made%20with-%E2%9D%A4%EF%B8%8F%20%E4%B9%9D%E4%B9%9D%E5%96%B5-ff69b4)](https://github.com/fuermos/jiujiu-bookstack)
 
 ---
 

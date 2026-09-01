@@ -1,5 +1,45 @@
 # 更新日志
 
+## [0.6.0] - 2026-09-01
+
+### 🎉 首个正式 Release
+
+这是项目第一个 GitHub Release（[v0.6.0](https://github.com/fuermos/jiujiu-bookstack/releases/tag/v0.6.0)），主要整理了文档与发布物料。
+
+### 📚 文档整合
+
+- **公众号文章 v4** 升级为 canonical 版本（`docs/article-wechat.md`，736 行 / 32 KB）
+  - 标题升级：《我用 Agent + Skill + MCP 三层架构，把家里 532 本书做成了一个会跟你对话的家庭知识库》
+  - 新增 LangGraph 升级章节（v0.6 路线图）+ 决策日志彩蛋
+  - 历史版本归档到 `docs/archive/`（v1 / v3）
+- **README** 添加 GitHub Stars / Latest Release / Python 版本 / 维护状态 badges
+- **docs/README 结构图** 在 QUICKSTART 中补齐文件树
+
+### 🛠️ Bug 修复
+
+- `pipeline.py --steps` 参数不生效（[bug_2026_08_29](https://github.com/fuermos/jiujiu-bookstack/issues/bug_2026_08_29)）
+- 心流模型 minimax 角色别名（处理 `` `minimax` `` 这类带特殊字符的角色名）
+- 9 个测试套件失败修复（11 fail → 0 fail，43 passed）
+
+### ⚙️ 配置增强
+
+- **在线模式预设**（主人 2026-08-29 钦定）
+  - `config/config-online.yaml` 模板新增，免 LM Studio 也能跑全流水线（用 minimax 1M context）
+  - 配置示例 `config.example.yaml` 加 `mode: online | local | hybrid` 开关
+- LLM fallback 链**更新注释**：`unsloth/qwen3.8-27b` → `qwen3.8-27b@iq2_s`（实际 LM Studio 暴露的 ID）
+
+### 📊 v0.6 数据状态
+
+| 指标 | 数量 |
+|---|---|
+| 库中书籍 | 9 本完整入库（24-30 + 600-601）|
+| 总剧本 | 30+ 个 v2_mixed（含 book 30 拆 29 个）|
+| MCP 工具 | 12 个只读 + v0.6 计划 +8-10 写工具 |
+| 回归测试 | 43 passed (0 fail) |
+| Docker | v2.29.7 + 3 容器编排（PG + app + web）|
+
+---
+
 ## [0.5.0] - 2026-08-27
 
 ### 🌟 重大升级：Agent + Skill + MCP 三层架构

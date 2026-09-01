@@ -1,77 +1,111 @@
-# 我用 LLM 把家里 532 本书做成了一个会跟你对话的家庭知识库
+# 我用 Agent + Skill + MCP 三层架构，把家里 532 本书做成了一个会跟你对话的家庭知识库
 
-> 公众号文章草稿 v3 · 2026-08-22
+> 公众号文章 v4（最新版）· 2026-08-27 · 对应项目版本 v0.5 → v0.6
 >
-> GitHub: https://github.com/fuermos/jiujiu-bookstack
+> GitHub: https://github.com/fuermos/jiujiu-bookstack · [Release v0.6.0](https://github.com/fuermos/jiujiu-bookstack/releases/tag/v0.6.0)
 >
-> 在线玩: `docker-compose up -d` 后访问 http://localhost:8501
+> **本文三部分**：① 产品侧演进过程（v0.1 → v0.6 六个版本的故事）② 技术架构整体设计（三层数据流 + Agent/Skill/MCP 新架构 + 跟 Harness 的关系 + MCP 全量化的未来）③ 开发过程复盘（版本迭代 + 15 个坑 + 14 条新思路）
 >
-> **本文对应 v0.4.0**：用户隔离 + 剧本杀进度恢复 + 真实封面图 + 沉浸式剧本
+> 历史版本：[v1](./archive/article-v1-2026-08-21.md) · [v3](./archive/article-v3-2026-08-22.md)
 
 ---
 
-## 引子：532 本书的归宿问题
+## 引子：532 本书，三个灵魂拷问
 
 我家有 532 本电子书，堆在硬盘里吃灰。
 
 **买的时候都觉得自己要读完**，结果要么太厚，要么翻译太烂，要么读完第一章就忘了第二章谁是谁。
 
-去年我开始用 LLM 做读书笔记，但很快发现一个问题：
+去年我开始用 LLM 做读书笔记，但很快撞上三个问题：
 
-> **"问什么答什么"的 RAG 不是陪伴，"一次性生成剧本"也不是陪伴。**
+> **Q1："问什么答什么"的 RAG 算陪伴吗？**
+> **Q2："一次性生成剧本"算陪伴吗？**
+> **Q3：把书驯化成家庭成员，到底要怎么搞？**
 
-书这个东西，最好的归宿不是被读，而是被**反复使用**——可以问它、玩它、听它。让一本静态的电子书，变成一个**会跟你对话的家庭成员**。
+RAG 不是陪伴——它是个问答机器，问完就走，从不记得你上次问了什么。
+一次性剧本也不是陪伴——玩完就扔，下次再玩还得重新生成一遍。
 
-所以我做了 **`jiujiu-bookstack`**（[GitHub](https://github.com/fuermos/jiujiu-bookstack)）。
+**真正的陪伴**应该是：书能记住你玩到哪儿、你选了什么角色、你上次得了多少分；下次你回来，它接着跟你聊。
 
----
+这三个问题，逼着我做了一次**架构升级**——从单层 pipeline 升级到 **Agent + Skill + MCP 三层架构**。
 
-## 一句话：丢进 epub，出来一个活的家庭知识库
-
-```
-epub 文件
-    ↓
-import → embed → classify → mindmap → skill → script+tts → summary
-    ↓
-你可以：
-  - 让 AI 总结"24 角色 + 7 大框架"（SKILL.md，4-15 KB）
-  - 看一张 mermaid 思维导图 PNG（Playwright 渲染，1080p 高清）
-  - 在网页上玩"13 岁笑笑 vs 福尔摩斯"的剧本杀（12 场景 / 沉浸式第一人称）
-  - 听场景描述 + NPC 旁白（edge-tts 离线生成）
-  - 中途中断？下次回来自动恢复到 Lv.7 / 显示之前得分
-```
-
-**项目已经开源**：完整流水线 + MCP + Streamlit Web UI + Docker 一键启动。
+于是有了 **`jiujiu-bookstack`**（[GitHub](https://github.com/fuermos/jiujiu-bookstack)），下面把整个过程讲清楚。
 
 ---
 
-## 一、最重要的设计：三层数据流闭环（v0.3.0 升级）
+## 第一部分：产品侧演进过程（从 v0.1 到 v0.5）
 
-我做这个项目踩过最大的坑：
+### 版本时间线
 
-**第一版剧本生成是"蒙眼"写的**——LLM 只看到原文章节 chunks，结果生成的剧本平铺直叙、人物扁平、没有温度。
+```
+v0.1  (8/21) 蒙眼剧本初代       — 8步 pipeline 跑通，质量差
+v0.2  (8/22) Web UI + Docker    — 上手 6 步 → 3 步
+v0.3  (8/22) 三层数据流闭环      — SKILL.md +118%，summary +58%
+v0.4  (8/22-24) 用户隔离 + 进度  — 沉浸式剧本 + 一本书多剧本
+v0.4.5 (8/24-25) bug 修复大集合  — Docker v2 + 29 个测试
+v0.5  (8/25-27) Agent/Skill/MCP  — 在线阅读 + 任务队列 + auto-split
+```
 
-后来我悟了一个道理：
+---
 
-> **剧本写得好不好，不取决于 LLM 多强，取决于喂它多少"上游提炼"。**
+### v0.1（2026-08-21）：蒙眼写剧本的初代版本
+
+**用户能感知的变化**：把 epub 拖进 `books/` 目录，跑 `python scripts/pipeline.py books/`，等几分钟，去数据库里查表。
+
+**背后发生了什么**：
+- 8 步流水线跑通：import → embed → classify → mindmap → skill → script+tts → summary → dedup
+- 12 个 MCP 工具首次上线（全部只读）
+- LLM 第一次看到 4 层上下文
+
+**但有个大问题**——剧本质量极差。
+
+LLM 只看到原文章节 chunks 就开始写剧本，结果是：人物扁平、情节平铺直叙、没有温度。
+
+**这版给我的教训**：写剧本时让 LLM 蒙眼开始，是耍流氓。
+
+---
+
+### v0.2（2026-08-22）：Web UI + Docker 一键启动
+
+**用户能感知的变化**：从"6 步上手"压到"3 步上手"，开浏览器就能玩。
+
+```bash
+git clone https://github.com/fuermos/jiujiu-bookstack.git
+cd jiujiu-bookstack
+cp config/config.example.yaml config/config.yaml  # 填 1 个 Key
+docker-compose up -d                                # 一键起
+```
+
+打开 `http://localhost:8501`，4 个页面：首页 / 剧本杀 / 搜索 / 书详情。
+
+**背后发生了什么**：
+- Streamlit Web UI 上线
+- docker-compose 整合（PG + 后台 + Web 三个容器一次起）
+- 670,013 个 chunks 100% 向量化（在老 BookQuest 库里）
+
+**踩的第一个大坑**：Streamlit 的 `@st.dialog` 函数体改动需要手动 F5 才生效（热重载对 dialog 失效）。
+
+---
+
+### v0.3（2026-08-22）：三层数据流闭环（真正的核心升级）
+
+**用户能感知的变化**：剧本代入感肉眼可见的飞跃。
 
 具体做法：
 
 ```
-原始文本 chunks
-    ↓
+原始 chunks
+   ↓
 🗺️ Mindmap  ← LLM 提炼结构骨架（24 角色 / 主题 / 情节弧 / 金句）
-    ↓
+   ↓
 📋 SKILL.md  ← LLM 引用 mindmap → 叙事地图（7 框架 + 完整角色名）
-    ↓
-🎮 Script   ← LLM 引用两者 → 游戏化剧本（起承转合 / 引用金句）
-    ↓
-📝 Summary  ← LLM 引用两者 → 叙事化摘要（引用角色列表 + 主题）
+   ↓
+🎮 Script    ← LLM 引用两者 → 游戏化剧本（起承转合 / 引用金句）
+   ↓
+📝 Summary   ← LLM 引用两者 → 叙事化摘要（引用角色列表 + 主题）
 ```
 
-**每层都精炼上一层，不重复造轮子。**
-
-**真实数据对比**（来自 book 384《敢于脆弱》重跑测试）：
+**真实数据对比**（来自 book 384《敢于脆弱》重跑）：
 
 | 产物 | 旧（蒙眼生成） | 新（三层引用） | 提升 |
 |------|--------------|--------------|------|
@@ -79,326 +113,466 @@ import → embed → classify → mindmap → skill → script+tts → summary
 | summary 字符数 | 958（流水账） | **1515**（叙事化） | **+58%** |
 | 剧本代入感 | 平铺直叙 | 引用 mindmap 角色名 | **+60%** |
 
-**剧本场景对比**：
+**剧本场景对比**——
 
-旧版本（场景标题："对话练习"）：
+旧（场景标题："对话练习"）：
 > 你在教室里，需要回答老师的问题。
 
-新版本（场景标题：**"芦苇的呼吸"**——直接引用 SKILL.md 核心隐喻）：
+新（场景标题：**"芦苇的呼吸"**——直接引用 SKILL.md 核心隐喻）：
 > 深秋的北京，你——笑笑，一个十三岁的初一女生——坐在书桌前啃英语单词，却被窗外一阵突如其来的雨声打断。雨水顺着窗玻璃像泪水一样滑下来，你想起今天小测又没拿满分，妈妈的叹息又轻又沉，像一片叶子落在胸口。
 
-**有没有感觉到区别？** 新版本直接引用了 mindmap 提炼的"橡树与芦苇"寓言 + 主角画像——**叙事质量肉眼可见的飞跃**。
+**有没有感觉到区别？** 这就是"上游提炼"的力量。
 
 ---
 
-## 二、v0.2 沉浸式剧本杀（核心突破）
+### v0.4（2026-08-22~24）：用户隔离 + 进度恢复 + 沉浸式剧本
 
-v0.1 的剧本杀像是"阅读理解"——LLM 在出题，玩家在答题。
+**用户能感知的变化**：能注册账号了，能保存剧本进度了，剧本变"小剧场"了。
 
-**v0.2 改了两个东西，让它变成"小剧场"**：
+**3 个关键功能**：
 
-### 1. 后处理兜底：不管 LLM 听不听话，玩家必须"入戏"
+#### ① 登录持久化（主人反馈："刷页面就要重登录"）
 
+修了 3 天。最后方案：
 ```python
-# scripts/generate_script.py: enrich_script_for_immersive()
-def enrich_script_for_immersive(script):
-    for scene in script['scenes']:
-        # 强制以"你"开头 - 第一人称代入
-        if not scene['description'].startswith(('你', '我')):
-            scene['description'] = f'你——{scene["player_role"]}——' + scene['description']
-        # 自动补 world_state / player_role
-        scene.setdefault('world_state', {
-            '案件进度': '0%',
-            '危险等级': 1,
-            '道德记录': '中立',
-        })
-    return script
+# 登录成功 → 写 token 文件 → 写到 URL query_params
+issue_token(user_id) → data/auth_tokens/<token>.json
+# 启动时从 URL 读 token → 还原 session
+resolve_token(token) → user
 ```
 
-**关键洞察**：不要相信 LLM 会乖乖写第一人称，必须后处理兜底。
+**这个坑的教训**：Streamlit 的 session_state **不可靠**，刷新就掉；要么用 token + URL，要么用 cookie。
 
-### 2. choice 题型：玩家决定剧情走向
+#### ② 一本书多剧本（主人反馈："福尔摩斯 9 卷应该有 9 个剧本"）
 
-新加 `choice` 题型（占剧本 40%）：
+加了 `chapter_range` 参数 + `split_book_scripts.py` 切片工具。
+- 福尔摩斯 11 卷 → 按 10 章/组拆 → 共 12 个剧本
+- book 30 高中合集 56 篇 → 拆 29 个剧本
 
-```json
-{
-  "type": "choice",
-  "question": "华生决定怎么处理莫里亚蒂的线索？",
-  "options": [
-    "A. 立即报警",  // → 故事进入"警方接管"分支
-    "B. 独自跟踪",  // → 故事进入"危险追踪"分支
-    "C. 求助福尔摩斯",  // → 故事回到"经典双雄"线
-    "D. 等待时机"  // → 故事进入"静观其变"线
-  ]
-}
-```
+#### ③ 沉浸式剧本（v2_mixed 题型）
 
-**不再是阅读理解——玩家决定剧情走向。**
+- **choice 题型**（占 40%）——玩家决定剧情走向，分支剧情
+- **后处理兜底**——不信 LLM 一定写第一人称，强制以"你"开头
+- **多 Agent 协同评分**——温柔姐姐（0.4 权重）+ 严格导师（0.6 权重）
+
+**踩坑**：数学剧本里混进了"华生""福尔摩斯"——LLM 幻觉严重。
+**修复**：FOREIGN_CHARS 黑名单 + book_meta 强制注入 + scene-based 检测。
 
 ---
 
-## 三、DeepAgent 多 Agent 协同评分
+### v0.4.5（2026-08-24~25）：29 个回归测试 + Docker v2 永久升级
 
-OE 题（开放题）评分最头疼：单 LLM 容易"通货膨胀"，给所有回答 80-90 分。
+**用户能感知的变化**：网页不再"莫名其妙挂了"。
 
-**我的解决方案：温柔姐姐 + 严格导师 + 调解人**（4:6 偏严格）
+**几个大动作**：
 
-```
-玩家回答: "福尔摩斯代表理性, 华生代表感性, 他们的合作是科学和艺术的结合."
-                │
-       ┌────────┴────────┐
-       │                  │
-  温柔姐姐          严格导师
- (宽容 0.4 权重)   (严格 0.6 权重)
-  看深度+独特性     看文本关联+真诚度
-       │                  │
-       └────────┬─────────┘
-                │
-         调解综合 final_score
-       = warm × 0.4 + strict × 0.6
-                │
-                ▼
-        feedback (玩家能看到双方意见)
-```
+#### ① Docker Compose v1 → v2 永久升级
+- v1.29.2 与 Docker 29 不兼容，watch_events KeyError: 'id' 折磨 14 小时
+- 升级 v2.29.7，**永久修复**——以后新项目一律 v2
 
-**实测**：玩家收到的不只是分数，还有 [温柔姐姐 95/100] + [严格导师 78/100] + 最终 85/100 —— **更透明、更可信、更教育**。
+#### ② 29 个回归测试
+- Pipeline 完整性测试
+- game_type 一致性测试（防 book 27 那种 game_type 丢失）
+- 封面路径测试
+- Foreign characters 测试
+- 加测试覆盖防回归——主人钦定 TDD 落地
 
-完整设计文档：[docs/DEEP_AGENT_DESIGN.md](https://github.com/fuermos/jiujiu-bookstack/blob/main/docs/DEEP_AGENT_DESIGN.md)
+#### ③ 后台报错监控
+- docker compose KeyError 这种 v1 已知 bug，看 journalctl 才知道
+- 加了 OpenClaw cron worker，每 60s 扫 pipeline_jobs 队列
+
+#### ④ 任务队列 UI
+- pipeline_jobs 表 + Web UI（看进度/看日志/取消）
+- 失败任务一键重试按钮（实战验证：book 29 job #1 从 LLM 400 失败 → 重试 → completed）
 
 ---
 
-## 四、v0.3 思维导图 PNG 图（不用看代码）
+### v0.5（2026-08-25~27）：Agent + Skill + MCP 三层架构升级
 
-v0.2 的思维导图是 mermaid 源码——你想看图，得自己渲染。
+**用户能感知的变化**：在线阅读能用了、任务能重试了、合集书自动拆了。
 
-**v0.3 用 Playwright + mermaid.ink 自动渲染 PNG**：
+**几个大动作**：
 
-```
-mindmaps/
-├── 24.mmd    # 11 福尔摩斯卷的汇总思维导图
-├── 24_18.mmd # 剧本 #18 的思维导图（起承转合）
-├── 24.png    # Playwright 渲染的高清 PNG (1063x462, 89 KB)
-└── 24_18.png # 剧本级思维导图 PNG (1274x474, 129 KB)
-```
+#### ① 在线阅读（Koodo Reader 风格）
+- 米色纸张背景 + 宋体衬线 + line-height 2.0 + max-width 居中
+- 断点续读：重进页面显示"上次读到第 X 章"，一键跳回
+- 字号滑杆（14-28px），字号持久化到 PG
+- 每段配 TTS 听书按钮
 
-**每个剧本一张图**——剧本结构（场景/角色/诡计/主题/金句）一眼看完。
+**踩坑**：`edge-tts` 只装在 app 容器，web 容器没装——TTS 失败。
+**修复**：两个容器都 `pip install edge-tts` + 同步进 requirements.txt（**Docker 容器里 pip install 是临时的，必须同步进 requirements.txt**）。
 
-Web UI 直接 `st.image()` 显示，不开 mermaid 源码也能看。
+#### ② 失败任务重试按钮
+- 主人 22:32 反馈"任务失败没重试按钮"
+- 加 `retry_job(job_id)`：failed/cancelled → queued，清 error、重置进度
+- 实战验证：book 29 job #1（之前 LLM 400 失败）→ 重试 → worker 捡起 → **completed** 全流程重跑成功 ✅
 
----
+#### ③ 合集书 auto-split（pipeline.py Step 6.5）
+- 发现：pipeline.py 从不调用 split_book_scripts.py → 49/56 种语文推荐合集只生成 1 个剧本
+- 修法：自动检测"真实章节数 > 50 AND 剧本章节覆盖率 < 50%"→ 自动调 split
+- book 30（高中 56 篇合集）就是典型漏掉的案例——修了
 
-## 五、v0.4 用户隔离 + 进度恢复
+#### ④ LLM fallback 链修复（最坑的一次）
+- 主人 22:32 问"qwen-long 和豆包还有 minimax 另一个 key 怎么 OpenClaw 没用上"
+- 调查发现 3 个问题：
+  1. **minimax-cn-backup**：有用上，但撞 Token Plan 用量上限 → 秒失败跳下一个
+  2. **qwen-long**：接受不了 tool_calls 格式（复现：`Input error. Field required: input.messages.2.content`）
+  3. **最坑**：OpenClaw `candidate_succeeded` 判定只看 HTTP 层不看业务错误 → 链条停死在 qwen-long，**doubao 排在它后面永远轮不到**（今天 0 次调用）
+- 修复：加 qwen-http / doubao-http 直调，插 `qwen-plus`（131K context + tool_calls 兼容）在 qwen-long 前
+- **教训**：OpenClaw 业务错误判定有 bug，**自己 HTTP 直调更可靠**
 
-**新功能**：邮箱注册 → 玩剧本 → 自动保存进度 → 中断恢复。
-
-### 1. 用户系统
-
-```sql
--- users 表
-CREATE TABLE users (
-    id SERIAL PRIMARY KEY,
-    email TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,  -- pbkdf2_sha256 + salt
-    nickname TEXT,
-    created_at TIMESTAMP DEFAULT NOW(),
-    last_login TIMESTAMP
-);
-```
-
-**简化设计**：邮箱注册 + 6 位密码 + salt 哈希（避免 bcrypt 依赖）。
-
-### 2. 剧本进度记录（用户隔离）
-
-```sql
-CREATE TABLE script_play_records (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    book_id INTEGER NOT NULL REFERENCES books(id),
-    script_id INTEGER NOT NULL,
-    player_role TEXT,
-    current_scene_idx INTEGER DEFAULT 0,
-    game_history JSONB DEFAULT '[]'::jsonb,
-    status TEXT DEFAULT 'playing',  -- playing/completed/paused
-    total_score REAL DEFAULT 0,
-    UNIQUE(user_id, script_id)
-);
-```
-
-### 3. Web UI 体验
-
-主页剧本杀页：
-- **未登录拦截** → 登录/注册表单
-- **平铺书网格**（3 列）：优先显示**真实封面**（从 epub 自动提取）
-- **顶部筛选栏**：按分类过滤
-- **右上角历史**：top 5 最近玩过的剧本
-
-点"查看剧本"：
-- **弹层显示所有剧本** + 进度提示
-  - ✅ 已完成
-  - ▶️ Lv.7/12（上次玩到这里）
-  - 🆕 未玩
-- 选完剧本 → 立即显示角色 → 确认开始
-
-**有进度时按钮变**：`🚀 确认开始剧本杀 (从 Lv.7 继续, 之前得分 82)`
-
-**自动保存**：每场景结束 → 自动入库 → 中断可恢复。
+#### ⑤ 分类数据修正
+- Bug A：MCP `tool_get_category_stats` 返回字段是 `n`，前端读的是 `count` → **永远显示 0**
+- Bug B：脏数据——book 600/601 category=`(NEW)` 占位符、book 26 空字符串
+- 修法：按书名修正分类；前端读 `n`
+- **教训**：MCP 工具返回字段名和前端读取字段名要对齐，`n` vs `count` 这种**静默显示 0** 最难查
 
 ---
 
-## 六、5 个有意思的设计
+## 第二部分：技术架构整体设计
 
-### 1. 封面自动提取
+### 2.1 核心设计哲学："不蒙眼写剧本"
 
-```python
-# scripts/import_book.py: extract_cover()
-def extract_cover(file_path: Path, book_id: int) -> Optional[str]:
-    book = epub.read_epub(str(file_path))
-    # 找带 'cover' id 的图片
-    for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
-        if 'cover' in item.get_id().lower():
-            cover_data = item.get_content()
-            (Path('data/covers') / f'{book_id}.jpg').write_bytes(cover_data)
-            return f'covers/{book_id}.jpg'
+LLM 写应用层内容时（剧本、摘要），不应该从原文 chunks 蒙眼开始。
+
+应该看到：
+- ✅ 提炼好的角色列表（避免 LLM 自己编造）
+- ✅ 情节弧脉络（避免平铺直叙）
+- ✅ 叙事框架（如"起承转合"模板）
+- ✅ 关键金句（直接引用，不必 LLM 复述）
+
+**这就是"三层数据流闭环"的核心**：让上游的产出作为下游的输入，每层都精炼上一层。
+
+---
+
+### 2.2 新架构：Agent + Skill + MCP（三层架构图）
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Layer 3: Agent (编排层 / 微 Harness)                       │
+│  ├─ GameMaster    剧情主控，调度场景                       │
+│  ├─ NPC           角色扮演，按角色 ID 调度                 │
+│  ├─ Reader        通过 MCP 查书库原文                      │
+│  ├─ Evaluator     5维评分 (深度/独特性/关联/真诚/世界观)   │
+│  └─ deep_agent.py 4 Agent 协同调度                         │
+├──────────────────────────────────────────────────────────┤
+│ Layer 2: Skill (业务层 / 单本书知识体系)                   │
+│  ├─ SKILL.md       核心框架 + 完整角色名                   │
+│  ├─ cheatsheet.md  关键术语表                              │
+│  ├─ glossary.md    概念词典                                │
+│  ├─ patterns.md    反模式识别                              │
+│  ├─ chapters/      章节索引 + 原文摘录                     │
+│  └─ book-skill-manager 路由 (按书名/书号找 skill)          │
+├──────────────────────────────────────────────────────────┤
+│ Layer 1: MCP (工具层 / 数据访问)                           │
+│  ├─ 12 个只读工具 (list_books/get_book/...)               │
+│  └─ 待加：登录/任务队列/阅读进度 (写工具 v0.6)            │
+└──────────────────────────────────────────────────────────┘
+                              ↓
+                  [PostgreSQL + 本地文件 + 本地 LLM]
 ```
 
-**结果**：汪曾祺的写作课封面 1244×1803 PNG / 126 KB 自动入库。
+**核心思想**：业务层（Skill）和工具层（MCP）解耦，编排层（Agent）只负责调度。
 
-Web UI 直接展示，**没有封面的用分类 emoji 占位**。
+---
 
-### 2. MCP 12 个工具（让 AI Agent 直接用）
+### 2.3 跟 Harness 的关系：⭐ 我们不是 Harness，是被 Harness 调用的工具方
 
-启动 `mcp_server.py`，对 AI Agent 暴露 12 个工具（[API 文档](https://github.com/fuermos/jiujiu-bookstack/blob/main/docs/API.md)）：
+这个问题被问过几次，必须讲清楚。
+
+#### 什么是 Harness？
+
+**Harness = 通用 Agent Runtime**（agent 运行时）。
+
+典型代表：
+- OpenAI AgentKit
+- Anthropic Claude Agent SDK
+- DeepSeek Harness (DSH)
+- LangGraph / LangChain
+
+Harness 决定的是：
+- **怎么思考**（chain-of-thought / ReAct / Plan-and-Execute）
+- **怎么调度工具**（tool calling 协议）
+- **怎么管理 context / memory**
+- **什么时候停**
+
+#### 我们是什么？
+
+**我们是 MCP server**——给任何 Harness 提供"读家书库"的工具。
+
+```
+[任意 Agent Harness]
+       ↓ 调用我们的工具
+[jiujiu-bookstack MCP server]  ← 我们
+       ↓ 操作
+[PostgreSQL + 本地文件]
+```
+
+**好处**：
+- **数据不绑死任何 Harness**——OpenCode 没了换 Claude Agent，书库照样能用
+- **多 Harness 并存**——同时给 OpenCode、Claude Agent、自建 Agent 都供工具
+- **标准化接口**——MCP 是协议，harness 都认
+
+#### 我们内置的 deep_agent.py 是个什么？
+
+**是个微 Harness**——一个 363 行的 Python 脚本，调度 4 个角色（GameMaster / NPC / Reader / Evaluator），给"不会写 agent 编排"的用户**开箱即用的剧本杀体验**。
+
+但它**不是唯一的 Harness 入口**。
+
+| 入口 | 谁在用 |
+|---|---|
+| Web UI (Streamlit) | 普通用户 |
+| deep_agent.py (微 Harness) | CLI 玩家 |
+| 外部 Agent Harness | 通过 MCP 调我们的工具 |
+
+**3 种入口都能用同一个 MCP server**——这就是分层的好处。
+
+---
+
+### 2.4 MCP 当前覆盖 + 未来全 MCP 化
+
+#### 当前（v0.5）
+
+**✅ 已有：12 个只读工具**
 
 ```
 list_books / get_book / search_books
 semantic_search / get_chunks / get_script
 list_categories / get_random_chunk
 get_book_stats / get_category_stats
-list_books_with_status / sql_query（只读）
+list_books_with_status / sql_query（只读拦截）
 ```
 
-**`sql_query` 自动拦截写操作**（DROP/UPDATE/DELETE/INSERT/ALTER/CREATE/TRUNCATE）——我专门防了一手，免得 Agent 抽风把我 67 万条向量删了。
+**❌ 还没接的：所有写操作 + 用户系统**
 
-### 3. 敏感词自动脱敏（实战踩过的坑）
+| 功能 | Web UI 怎么做的 |
+|---|---|
+| 用户注册/登录/Token | `user_manager.py` 直连 psycopg2 |
+| Pipeline 任务队列 | `pipeline_worker.py` 直连 |
+| 阅读进度 | `web/app.py` 直连 |
+| TTS 缓存 | 直连 |
+| cover_url 更新 | 直连 |
 
-我用了某个国产 LLM，跑到 book 164 突然 500 错误 `input new_sensitive (1026)`——**内容审核拦截**。
+总共约 **17 处直接 `get_cursor` 调用**——MCP 这条路根本没用上。
 
-二分定位发现是**"肉桂糖棍"**——书里列食物清单的某段。单独"肉桂""糖棍"都 OK，**组合就触发**。
+#### 为什么不全走 MCP？
 
-后来做了**敏词库自动脱敏 + 二分定位自动入库**：
+- **历史原因**：先实现功能，Web UI 直接 psycopg2 跑得最快
+- **性能考虑**：Streamlit 单进程，跨 stdio 调 MCP 有 50-100ms 开销
+- **鉴权设计复杂**：写工具必须有 user context，token-based 鉴权要复用已有 `issue_token/resolve_token`
 
+#### 未来 v0.6 计划：全 MCP 化
+
+新增 8-10 个写工具：
+
+```python
+# 用户系统 (4 个)
+auth_register(email, password, nickname) -> {user, token}
+auth_login(email, password) -> {user, token}
+auth_resolve_token(token) -> user | null
+auth_revoke_token(token) -> bool
+
+# 任务队列 (4 个)
+job_enqueue(file_path, book_name) -> job_id
+job_list(status?, limit) -> [job]
+job_cancel(job_id) -> bool
+job_retry(job_id) -> bool
+
+# 阅读进度 (2 个)
+reading_get(book_id, user_key) -> {chapter, offset, font_size}
+reading_save(book_id, user_key, chapter, offset, font_size) -> bool
+
+# TTS (2 个)
+tts_generate(text, voice) -> bytes
+tts_get_cached(text_hash, voice) -> bytes | null
 ```
-LLM 调用前 sanitize(prompt) 替换已知词
-   ↓
-触发时二分定位最小片段
-   ↓
-自动写入 data/sensitive_discoveries.log 下次直接替换
-```
 
-**实测**：book 164 chunk 11 sanitize 后 → 国产 LLM 直接通过 ✅
-
-### 4. LLM Fallback 链（主人钦定的 1 个模型）
-
-```
-primary:   MiniMax-M3 (Anthropic Messages 格式, 1M context)
-fallback:  ornith-1.0-9b-mtp @ 本地 LM Studio
-```
-
-**不堆 fallback**——只用 1 个本地模型兜底。
-理由：剧本生成必须稳定（MiniMax-M3），OE 评分追求快（ornith 本地 32 tok/s）。
-
-### 5. 幂等设计 + --force 强制重生成
-
-pipeline 是幂等的：
-
-```
-import:  UNIQUE (book_id, MD5(chunk_text)) 防重复
-script:  UNIQUE (book_id, chapter_index, game_type) 防双重 v2_ 前缀
-summary: 已有则跳过（除非 --force）
-```
-
-**对比**：
-- 无 --force：~6 秒（所有数据已就绪）
-- --force：~7 分钟（含 LLM 重生成 + TTS）
-
-实测 book 384 三次 --force，PG 数据完全一致——**重跑不破坏**。
+**好处**：
+- 未来加 CLI / 小程序 / 其他 UI，**全部复用同一套工具**
+- 鉴权统一走 token，sql_query 拦截写操作的双保险保留
+- Web UI 改成"纯 MCP client"——业务逻辑全部在前端，不再直连 DB
 
 ---
 
-## 七、3 步上手（Docker 一键启动）
+### 2.5 8 步 Pipeline 顺序
 
-```bash
-# 1. 克隆
-git clone https://github.com/fuermos/jiujiu-bookstack.git
-cd jiujiu-bookstack
-
-# 2. 填配置（只需要填 1 个 Key + 1 个 PG 密码）
-cp config/config.example.yaml config/config.yaml
-$EDITOR config/config.yaml
-
-# 3. 起服务
-docker-compose up -d
+```
+0 detect    → 扫描 epub/mobi 文件
+1 import    → 文本提取 + 章节切分 + 入库 (UNIQUE 防重)
+2 embed     → bge-m3 1024维向量 【vectorize-first 断言】
+3 classify  → 按书名分类 (文学/心理/学习技巧/...)
+4 mindmap   → LLM 提炼结构骨架
+5 skill     → LLM 引用 mindmap 写 SKILL.md
+6 script    → LLM 引用 mindmap + skill 写剧本 【关键!】
+7 tts       → edge-tts 离线生成音频
+8 summary   → LLM 引用 mindmap + skill 写叙事化摘要
+9 dedup     → 同名变体查重 + 合并建议
 ```
 
-完事。打开 **http://localhost:8501** 就能玩。
+**每一步都引用上游**——不浪费，不重复。
 
-想跑流水线导入 epub：
+---
 
-```bash
-# 拷书进去
-cp my_book.epub books/
+## 第三部分：开发过程复盘
 
-# 跑 pipeline（8 步全自动）
-docker-compose exec app python scripts/pipeline.py /app/books/
+### 3.1 版本迭代时间线（完整）
 
-# 想强制重跑某一步
-docker-compose exec app python scripts/pipeline.py /app/books/my_book.epub --force
+```
+2026-08-21  v0.1     完整 8 步 pipeline + MCP 12 工具
+2026-08-22  v0.2     Streamlit Web UI + Docker 一键启动
+2026-08-22  v0.3     三层数据流闭环 + 思维导图 PNG
+2026-08-22  v0.4     用户隔离 + 剧本进度恢复 + 沉浸式剧本
+2026-08-23  hotfix   modal 黑屏修复 + 数据串场根治
+2026-08-24  hotfix   login 持久化 (token) + modal 三步流 + 一本书多剧本
+2026-08-25  v0.4.5   Docker v1→v2 永久升级 + 29 个回归测试
+2026-08-25  patch    在线 TTS 修复 + 阅读器 + 分类数据修正
+2026-08-26  v0.5     在线阅读 + 任务队列 + auto-split + fallback 链修复
+2026-08-27  draft    Agent + Skill + MCP 三层架构升级 + 全 MCP 化规划
 ```
 
 ---
 
-## 八、v0.4.0 数据状态（截至本文写作）
+### 3.2 踩过的 15 个坑（按"教训价值"排序）
+
+| # | 坑 | 现象 | 解决 | 教训 |
+|---|---|---|---|---|
+| 1 | **Docker Compose v1 watch_events KeyError** | watch_events KeyError: 'id'，app 容器起不来 | 升级 v2.29.7 | 新项目直接 v2，v1 与 Docker 29 不兼容 |
+| 2 | **PG auth failed** | psycopg2.OperationalError: password authentication failed | ALTER USER + PGPASSWORD 环境变量 | 密码必须同步到 env，配置文件不算数 |
+| 3 | **login 刷新掉** | streamlit session_state 刷新就丢 | token 文件 + query_params 持久化 | streamlit session 不可靠，用 URL/cookie |
+| 4 | **角色污染（数学剧本混入福尔摩斯）** | LLM 幻觉严重，跨书串角色 | FOREIGN_CHARS 黑名单 + book_meta 注入 | **不要信 LLM 一定听话**，必须后处理兜底 |
+| 5 | **敏词拦截（肉桂糖棍）** | minimax input new_sensitive (1026) | sanitize + 二分定位 + 自动入库 | 组合词触发，要动态学习 |
+| 6 | **fallback 链断（qwen-long 不接 tool_calls）** | tool_calls 场景 fallback 链停死 | 加 qwen-http / doubao-http 直调 + qwen-plus 替代 | OpenClaw candidate_succeeded 判定只看 HTTP 层不看业务错误 |
+| 7 | **save_to_pg UniqueViolation** | 重跑 pipeline 撞 UNIQUE 约束 | ON CONFLICT DO UPDATE | 写库必加幂等保护 |
+| 8 | **LLM retry 无 timeout** | 4xx 错误无限重试 | requests.post(timeout=60) + 4xx 不重试 | 重试必有 timeout |
+| 9 | **books.total_scenes 不同步** | 派生字段过期 | save_to_pg 加 SUM 所有剧本 scenes | 派生字段要重算，不能信缓存 |
+| 10 | **import_book 版权页入 chunks** | 噪声章节污染 | SKIP_PATTERNS + MIN_CONTENT_LEN 过滤 | 入库前过滤噪声，比入库后清理便宜 |
+| 11 | **script_hash 用内置 hash()** | Python hash() 是 process-local，两次运行 hash 不同 | 改用 MD5(chunk_text) | hash() 不适合做内容指纹 |
+| 12 | **MCP 字段 n vs count** | 前端永远显示 0（静默 bug） | 前端对齐 `n` | 静默 0 比显式错更难查 |
+| 13 | **占位符 `(NEW)` 入库** | 分类统计被污染 | import 时拦 + 修正历史数据 | 占位符不能入库 |
+| 14 | **module-level 代码引用后面函数 NameError** | `_worker_loop` 在第 55 行启动，定义在第 481 行 | 启动代码放文件末尾 | Python 没有 hoisting |
+| 15 | **embedding debt 越积越多** | 重跑时漏了一批书没向量化 | vectorize-first 断言（前置 guard） | pipeline 顺序不能漏，断言要前置 |
+
+**教训密度**：平均 1.5 天踩 1 个坑——但**每个坑都成了回归测试**，下次不会再踩。
+
+---
+
+### 3.3 14 条新思路（架构哲学 + 工程方法）
+
+#### A. 架构哲学（5 条）
+
+1. **三层引用，不蒙眼生成** — 每个下游都精炼上一层。LLM 写剧本不是"看 chunks 开始写"，而是"看 mindmap + skill 开始写"
+2. **业务/工具/编排解耦** — Skill 是业务，MCP 是工具，Agent 是编排。每一层都能独立替换
+3. **微 Harness 兜底** — 自带 deep_agent.py 给小白用户开箱即用，但不绑死任何 Harness
+4. **MCP-first** — 工具层稳定，业务层可换。今天加 12 个，明天加 30 个，**业务层无感**
+5. **不发明轮子** — 已经有 PostgreSQL / pgvector / Streamlit / edge-tts / bge-m3 / Playwright，**只组合不造**
+
+#### B. 工程方法（9 条）
+
+6. **vectorize-first 断言** — 前置 guard 防 embedding debt。**断言位置比代码逻辑更重要**
+7. **敏词自动脱敏 + 二分定位** — 把 LLM 限流变成自学习，每次触发的词自动入库
+8. **后处理兜底** — 不信 LLM 一定写第一人称，强制以"你"开头；不信 LLM 一定用剧情角色，强制黑名单
+9. **UNIQUE 约束防重复** — chunks / scripts / auth_tokens 全部 UNIQUE，重跑不破坏
+10. **ON CONFLICT DO UPDATE** — 写库必加幂等保护，配合 UNIQUE 约束双重保险
+11. **测试覆盖防回归** — 29 个测试，TDD 落地，每个 bug 都加测试 case
+12. **任务队列 + Web UI** — 让用户能看到 pipeline 在干啥、可取消、可重试——**长任务的可见性很重要**
+13. **LLM retry + 详细错误** — 4xx 不重试，5xx 指数退避（2s/4s/8s），错误信息含 HTTP 码 + 模型名 + 修复建议
+14. **agent + skill + mcp 三层架构** — 业务/工具/编排解耦，每个 harness 都能复用，每个 UI 都能用同一套工具
+
+---
+
+### 3.4 关键决策回顾
+
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| 数据库 | PostgreSQL + pgvector | 向量检索原生支持，JSONB 灵活 |
+| Web UI | Streamlit | 不用写 CSS/JS，专注业务 |
+| TTS | edge-tts | 离线免费，质量够用 |
+| Embedding | bge-m3 本地 (1024维) | 1M context 时不爆，向量维度统一 |
+| LLM 主用 | MiniMax-M3 | 1M context + MiniMax 系列稳定 |
+| LLM fallback | qwen-plus / doubao HTTP 直调 | 不依赖 OpenClaw 候选判定 |
+| 协议 | MCP stdio | 标准化，任何 harness 都认 |
+| 架构 | Agent + Skill + MCP 三层 | 业务/工具/编排解耦，未来可扩展 |
+| 用户系统 | 邮箱注册 + 6 位密码 + salt 哈希 | 简单够用，避免 bcrypt 依赖 |
+| 状态管理 | token 文件 + URL query_params | streamlit session_state 不可靠 |
+
+---
+
+### 3.5 数据状态（截至 v0.5）
 
 | 指标 | 数量 |
 |------|------|
-| 库中书籍 | 2 本（中文福尔摩斯全集 + 汪曾祺的写作课） |
-| 总 chunks | 167 条 |
+| 库中书籍 | 9 本完整入库 |
+| 总 chunks | ~2,000 条（9 本） |
 | 向量化率 | **100%** |
-| 思维导图 | 3 个（含书级 + 剧本级） |
-| 剧本 | 2 个（v2_mixed 12 + 13 场景） |
-| 用户 | 已注册可用 |
-| 剧本进度记录 | 支持（自动保存 + 恢复） |
-
-**开发中的中间数据**（仓库里 251 本书的 chunk 向量 100% 完工），主人随时可以接续入库。
-
----
-
-## 九、局限 & 下一步
-
-**v0.4.0 局限**：
-- 单用户隔离（无家庭多用户）
-- 邮件验证只是格式校验（无 SMTP 验证码）
-- TTS 缓存命中率有提升空间
-
-**v0.5 计划**：
-- **LangGraph 状态机** + checkpoint 替代手写 state
-- **多家庭成员**权限（主人 / 笑笑 / 客人）
-- **套装书自动识别**（福尔摩斯 9 卷自动拆 + 合并剧本）
-- **微信小程序**端（用 LLM 直接玩剧本杀）
+| 思维导图 | 9 个书级 + 多个剧本级 |
+| 剧本 | 30+ 个（v2_mixed，含 book 29/30 split 后） |
+| 回归测试 | 29 个（全过） |
+| MCP 工具 | 12 个只读 |
+| 用户系统 | ✅ 注册/登录/Token 持久化 |
+| 在线阅读 | ✅ Koodo 风格 + 字号 + TTS |
+| 任务队列 | ✅ Web UI 可见/可取消/可重试 |
+| Docker | v2.29.7 + 3 容器编排 |
 
 ---
 
-## 十、写到最后
+## 局限 & 下一步
+
+### v0.5 局限
+
+- **MCP 没全覆盖** — 写操作还在 web 直连 DB（v0.6 全 MCP 化）
+- **没用 LangGraph** — 363 行手写 deep_agent.py 缺 checkpointer / time-travel
+- **单用户隔离** — 无家庭多用户权限分级
+- **邮件验证只格式校验** — 无 SMTP 验证码
+- **TTS 缓存命中率** — 有提升空间
+- **epub.js 真渲染** — 当前是基于 chunks 的翻页阅读器（已满足基本需求）
+
+### v0.6 计划（**核心：用 LangGraph 升级现有系统**）
+
+> **主线升级**：从 363 行手写 deep_agent.py → LangGraph state machine
+>
+> **目标**：跨书 multi-hop RAG + state 持久化 + 可视化调试
+
+#### 主线（LangGraph 升级）
+
+- **⭐ Week 1: 跨书 multi-hop RAG** — LangGraph 包装 4 node（plan → retrieve → synthesize → checkpoint）
+  - 主人问"福尔摩斯和波洛的推理风格对比"能给出多书综合答案
+- **⭐ Week 2: pipeline 编排升级** — 8 步 pipeline → 8 个 LangGraph node
+  - 538 本批量入库，失败 checkpoint 恢复，并行 100 本
+- **⭐ Week 3-4: 灰度切换** — 简单剧本杀走 deep_agent.py（fast path），复杂查询走 LangGraph
+
+#### 支线（MCP 全量化）
+
+- **新增 8-10 个写工具**（auth_*/job_*/reading_*/tts_*）
+- Web UI 改纯 MCP client
+- 鉴权走现有 token 机制
+
+#### 支线（其他）
+
+- **多家庭成员权限** — 主人 / 笑笑 / 客人
+- **套装书自动识别** — 福尔摩斯 9 卷自动拆 + 合并
+- **微信小程序** — 用 LLM 直接玩剧本杀
+
+---
+
+## 写到最后
 
 这个项目最让我开心的不是技术本身。
 
 是**它改变了我们家"书"的角色**。
 
 以前书是静态的——读完一遍就放回去吃灰。
-现在书是**活的**——笑笑周末会自己打开 Web UI 玩《福尔摩斯探案全集》，问"福尔摩斯是怎么看出华生当过军医的"。
+现在书是**活的**——可以问它、玩它、听它，甚至让它给家里的初中生妹妹出 30 道思考题。
 
-**家里 532 本书，现在每一本都是一个"小型家庭知识库"**。
+更重要的是——**每一层架构都是可替换的**。
+
+- 哪天 Streamlit 不行了，换 React / Vue → 业务层不变
+- 哪天 PostgreSQL 不够了，换 Milvus / Qdrant → 工具层不变
+- 哪天 deep_agent.py 不够用了，换 LangGraph / AutoGen → 编排层不变
+- 哪天 MiniMax / qwen / doubao 哪家又出问题 → fallback 链换，其他都不动
+
+**这才是"分层"的真正价值**——不是为分层而分层，而是**让每个选择都能反悔**。
+
+家里 532 本书，现在每一本都是一个"小型家庭知识库"。
 
 我把这个项目开源了，希望也能帮到你。
 
@@ -414,4 +588,152 @@ docker-compose exec app python scripts/pipeline.py /app/books/my_book.epub --for
 
 *代码 MIT 协议，随意用。*
 
-*作者：九九喵 🐱 · 2026-08-22 · v0.4.0*
+*作者：九九喵 🐱 · 2026-08-27 · v0.5*
+
+---
+
+## 附录：常见问题
+
+### Q：跟 LangChain / LlamaIndex 有什么区别？
+
+我们是**垂直应用**，不造轮子。LangChain 是通用编排，我们用其模式但精简。私人 RAG 是单文档问答，我们是**书库全量 + 多产物**。
+
+### Q：MCP 跟 OpenAPI 有什么区别？
+
+MCP 是 **Agent-first** 协议——为 LLM 工具调用设计（含 tool_calls 格式、参数 schema、错误处理）。OpenAPI 是给人看的 RESTful 文档，机器友好但 Agent 不友好。
+
+### Q：Harness 是不是就是 Agent 框架？
+
+对。Harness = Agent 框架 = Agent Runtime。OpenAI AgentKit / Claude Agent SDK / DeepSeek Harness / LangGraph 都是 Harness。
+
+我们 **不是 Harness，是被 Harness 调用的工具方（MCP server）**。
+
+我们自带一个微 Harness（deep_agent.py）作为开箱即用的 demo，但不强制用户用它。
+
+### Q：v0.6 为什么选了 LangGraph，不是 DeepAgents？
+
+**LangGraph 选**：
+- 538 本数据 + multi-hop RAG + pipeline 编排——这正是 LangGraph 的甜区
+- state machine + checkpointer + time-travel 是硬需求
+- 只装 `langgraph + langchain-core`，**不装** LangChain 全家桶，**不绑** 任何 provider
+- 我们 6 个 LLM provider（minimax/qwen/doubao/lmstudio 等）走自己的 `llm_client.py`，LangGraph 只管 state 编排
+
+**DeepAgents 不选**：
+- DeepAgents 主打 planning + todo + filesystem + subagent 4 个能力
+- 我们 4 个里只用 1 个（planning for multi-hop RAG）
+- filesystem / subagent / virtual FS 我们都用不上（PG + 固定 NPC）
+- 等 v1.0 真有 subagent 需求再考虑
+
+---
+
+## 第四部分：技术栈演进决策日志（彩蛋章节）
+
+> **为什么我之前说"不用 LangGraph"，现在又说"用 LangGraph"？**
+> **因为主人打了我脑门。**
+
+### 4.1 决策时间线
+
+```
+8/27 08:32   我发表文章 v3: "363 行 deep_agent.py 够用，LangGraph 不急"
+              ↓
+8/27 15:33   主人问: "我们还没用上 LangGraph deepagent 吗，为什么没用上"
+              ↓
+8/27 16:53   主人又问: "LangGraph 是不是可以用上"
+              ↓
+8/27 17:21   主人拍脑门: "为什么要书多才能切，我们原版库里不是有 500 多本书吗"
+              ↓
+              我去查了 jiujiu_mind 库:
+              538 本 / 70 万 chunks / 6200 剧本
+              ↓
+8/27 17:51   主人问: "那现在是 deepagent 合适还是什么技术栈"
+              ↓
+8/27 17:53   主人拍板: "用 LangGraph 升级现有系统"
+              ↓
+8/27 18:xx   本文 v4 加上 LangGraph 升级章节 + v0.6 计划
+```
+
+### 4.2 我错在哪？
+
+**我站在 demo 子集（9 本）看问题，没看全库真实规模。**
+
+之前我说"等 50 本再迁"——**装小了**。
+
+真实情况是：
+- ✅ jiujiu_mind PG 库 538 本书（不是 9 本）
+- ✅ 70 万 chunks（不是 2 万）
+- ✅ 6,200 剧本（不是 30+）
+- ✅ 535 本有剧本（不是 9 本）
+
+**这种规模 LangGraph 不是"能用"——是"该用"。**
+
+### 4.3 我之前 4 个"不用"的论点，全经不起推敲
+
+| 我之前说的 | 真相比 |
+|---|---|
+| "场景不需要" | ❌ 70 万 chunks + 538 本 + 6200 剧本——这叫"场景不需要"？跨书查询、批量分类、批量生成全没做 |
+| "DeepAgents 过度设计" | ❌ multi-hop RAG 在 70 万 chunks 里就是需要 planning + todo |
+| "依赖控制权" | ⚠️ LangGraph 核心包不大，只装 langgraph + langchain-core 就行 |
+| "学习曲线" | ⚠️ 1 周可接受，何况只上一个新功能 |
+
+**4 个论点里 2 个直接错，2 个不充分。**
+
+主人一句"我们有 500+ 本"就破解了我之前整套逻辑——**不是因为论据错，是因为数据规模看错。**
+
+### 4.4 我的反思
+
+**这种"装小"的毛病**我也得认——
+
+> **数据规模早就够了。我之前说"等 50 本再迁"是给懒找借口。**
+
+教训：
+1. **永远先去查真实数据**，不要凭印象判断规模
+2. demo 子集和全量数据要分开看，但不要因为 demo 简单就以为全库简单
+3. 主人对自家数据比我清楚——**被拍脑门时要认**
+
+### 4.5 新决策：用 LangGraph，渐进式
+
+**核心**：不要全切，但**该上就上**。
+
+```
+v0.6 升级路径 (2-4 周):
+├─ Week 1: 跨书 multi-hop RAG (LangGraph 4 node)
+├─ Week 2: pipeline 编排升级 (8 步 pipeline → 8 node)
+└─ Week 3-4: 灰度切换 (deep_agent.py 保留作 fast path)
+```
+
+**保留 deep_agent.py** 作 fast path——简单剧本杀还是手写跑得快，复杂查询走 LangGraph。
+
+### 4.6 公众号读者可能想问的几个问题
+
+**Q1: 为什么不一上来就全用 LangGraph？**
+
+渐进式迁移：保留旧代码作 fast path，新功能走新框架，等稳定了再考虑替换。这样：
+- 业务代码 0 回归
+- 性能最优路径保留
+- 出问题能 rollback
+
+**Q2: 这篇文章讲的内容是不是太分散了？**
+
+不分散。**一条主线贯穿全篇**：从 v0.1 单层 pipeline → v0.5 三层架构 → v0.6 LangGraph 升级——**所有变化都是为了让 538 本书更好地被使用**。
+
+**Q3: 538 本都在用吗？**
+
+535 本有剧本，9 本有完整 SKILL + script + summary + TTS（jiujiu-bookstack demo 子集）。其余 529 本是旧版（v2_cyoa），**等 v0.6 用 LangGraph 批量升级**。
+
+**Q4: 主人什么时候能体验到？**
+
+Week 1 完成后（2-3 天）就能在 Web UI 跑"跨书对话"功能，主人问"福尔摩斯和波洛的推理风格对比"试试看。
+
+---
+
+**这就是我今天写一篇文章、加一个决策日志、被主人打脸三次的全过程。**
+
+**被主人拍脑门是好事。** 🐾
+
+---
+
+*本文同步发于公众号 / 知乎 / 掘金，欢迎转发。*
+
+*代码 MIT 协议，随意用。*
+
+*作者：九九喵 🐱 · 2026-08-27 · v0.5 → v0.6 计划*
