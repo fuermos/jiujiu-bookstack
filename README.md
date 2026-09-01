@@ -41,7 +41,10 @@ jiujiu-bookstack/
 │   ├── ARCHITECTURE.md        ← 三层数据流闭环架构详解
 │   ├── QUICKSTART.md          ← 5分钟上手
 │   ├── API.md                 ← MCP 12 工具文档
-│   └── CHANGELOG.md
+│   ├── article-wechat.md      ← 公众号文章 v4（最新发布版）
+│   ├── archive/               ← 历史版本 (article-v1 / v3)
+│   ├── DEEP_AGENT_DESIGN.md   ← DeepAgent 多 Agent 协同设计
+│   └── CHANGELOG.md           ← @ 根目录
 ├── scripts/
 │   ├── pipeline.py            ← 主入口：完整 8 步流水线
 │   ├── import_book.py         ← 步骤1：epub → chunks 入库
@@ -268,7 +271,7 @@ MIT
 
 ## 🔗 衍生文章
 
-配套公众号文章草稿：[`docs/article-wechat.md`](docs/article-wechat.md)（待发布）
+配套公众号文章：[`docs/article-wechat.md`](docs/article-wechat.md)（v4 已发布 / v0.5 → v0.6）
 
 ---
 
